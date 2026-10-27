@@ -499,9 +499,9 @@ async function runCapture(job, creds, outDir) {
           await settle(page);
           for (let i = 0; i < t.steps.length; i++) {
             const before = page.url();
-            // Clear stray pop-ups before the last click, so that if the click
-            // opens a menu, the menu can be left open and the page still clean.
-            if (i === t.steps.length - 1) await cleanPage(page, size, false);
+            // Clear stray pop-ups once, before the first click. Cleaning between
+            // steps would close a menu the previous step opened.
+            if (i === 0) await cleanPage(page, size, false);
             await clickStep(page, t.steps[i]);
             await note('clicked "' + t.steps[i] + '"');
             if (popup) throw new CaptureError('"' + t.steps[i] + '" opens a new window, which this version does not capture.');

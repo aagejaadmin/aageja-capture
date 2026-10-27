@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.0.4 (October 2026)
+ * AaGeJa Capture Service — v1.0.5 (October 2026)
+ *
+ * v1.0.5
+ *   - Stray pop-ups are cleared once, before the first menu click. v1.0.4
+ *     cleared them before the last click, which pressed Escape and closed the
+ *     menu the previous step had opened, so second-level items were not found.
  *
  * v1.0.4
  *   - When the last menu step opens something without leaving the page (a
@@ -70,7 +75,7 @@ const { runCapture, parseTargets, parseSize, CaptureError } = require('./capture
 const png = require('./png-meta');
 const github = require('./storage-github');
 
-const VERSION = '1.0.4';
+const VERSION = '1.0.5';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
