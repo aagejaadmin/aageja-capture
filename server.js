@@ -1,6 +1,17 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.0.0 (October 2026)
+ * AaGeJa Capture Service — v1.0.1 (October 2026)
+ *
+ * v1.0.1 — first run against a real site (Cornerstone training environment)
+ *   - "/" or the environment address means the page reached after sign-in.
+ *     On sites whose root address is the sign-in page, it had led back there.
+ *   - A form post that loads a new page is allowed while the service opens a
+ *     listed page or clicks a safe menu step, and still refused when a page
+ *     posts on its own. Older web apps move between pages with form posts.
+ *     DELETE, PUT and PATCH stay refused at all times after sign-in.
+ *   - Status adds trace (each page visited: site and path only), blocked
+ *     (requests refused) and a screenshot of each page that failed, for
+ *     preview only. None of these are saved to the library.
  *
  * The server side of the Screenshot Library Builder agent. Runs a browser
  * with no screen (Playwright), separate from content-api so a browser's
@@ -41,7 +52,7 @@ const { runCapture, parseTargets, parseSize, CaptureError } = require('./capture
 const png = require('./png-meta');
 const github = require('./storage-github');
 
-const VERSION = '1.0.0';
+const VERSION = '1.0.1';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
@@ -126,8 +137,11 @@ function publicJob(job, req) {
       ...s,
       preview_url: b + '/capture/image/' + job.id + '/' + encodeURIComponent(s.folder) + '/' + encodeURIComponent(s.filename),
     })),
-    not_captured: job.not_captured,
+    not_captured: job.not_captured.map((n) => ({ ...n, ...(n.debug_image ? { debug_preview_url: b + '/capture/image/' + job.id + '/_debug/' + n.debug_image } : {}) })),
     error: job.error || null,
+    debug_preview_url: job.debug_image ? b + '/capture/image/' + job.id + '/_debug/' + job.debug_image : null,
+    trace: job.trace,
+    blocked: job.blocked,
     library: job.library || null,
   };
 }
@@ -201,7 +215,7 @@ async function start(req, res) {
     id, status: 'queued', stage: '', created: Date.now(),
     product, client, environment_url: env.href, size, mask_words: maskWords, targets,
     progress: { done: 0, total: targets.length, current: '' },
-    screens: [], not_captured: [], masked: 0, blocked_requests: 0,
+    screens: [], not_captured: [], masked: 0, blocked_requests: 0, blocked: [], trace: [], debug_image: '',
     _creds: { username: String(body.username || ''), password: String(body.password || '') },
   };
   jobs.set(id, job);
@@ -270,7 +284,7 @@ async function finalize(req, res, job) {
   const library = {
     product: job.product, client: job.client, environment_url: job.environment_url,
     captured: date, image_size: job.size.width + 'x' + job.size.height, count: images.length,
-    images, not_captured: job.not_captured,
+    images, not_captured: job.not_captured.map((n) => ({ target: n.target, reason: n.reason })),
   };
   files.push({ path: folder + '/library.json', content: Buffer.from(JSON.stringify(library, null, 2) + '\n', 'utf8') });
 
@@ -283,7 +297,7 @@ async function finalize(req, res, job) {
     commit, written: rows.length, total_in_library: images.length, descriptions_missing: missing,
   };
   console.log('[job ' + job.id + '] saved ' + rows.length + ' image(s) to ' + repo + '@' + branch + ' (' + commit.slice(0, 7) + ')');
-  send(res, 200, { ...job.library, images: rows, not_captured: job.not_captured });
+  send(res, 200, { ...job.library, images: rows, not_captured: library.not_captured });
 }
 
 const server = http.createServer(async (req, res) => {
@@ -301,7 +315,9 @@ const server = http.createServer(async (req, res) => {
       const job = jobs.get(m[1]);
       const folder = decodeURIComponent(m[2]);
       const file = decodeURIComponent(m[3]);
-      const s = job && job.screens.find((x) => x.folder === folder && x.filename === file);
+      const isDebug = folder === '_debug' && job && /^debug-\d+\.png$/.test(file) &&
+        (job.debug_image === file || job.not_captured.some((n) => n.debug_image === file));
+      const s = job && (isDebug ? { folder, filename: file } : job.screens.find((x) => x.folder === folder && x.filename === file));
       if (!s) return send(res, 404, { error: 'Image not found or expired' });
       const buf = fs.readFileSync(path.join(WORK_DIR, job.id, s.folder, s.filename));
       res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': buf.length, 'Cache-Control': 'private, max-age=3600' });

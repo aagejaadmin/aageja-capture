@@ -330,6 +330,34 @@ async function runCapture(job, creds, outDir) {
   const allowedHosts = new Set([envUrl.host]);
   const used = new Set();
   let popup = false;
+  // guard: on after the first sign-in. acting: true only while the service
+  // itself is signing in, opening a listed page or clicking a safe menu step.
+  const state = { guard: false, acting: false };
+  let page = null;
+  let debugN = 0;
+
+  /** Records where the browser is: site and path only, never query strings. */
+  const note = async (step) => {
+    if (!page || job.trace.length >= 200) return;
+    job.trace.push({ step, url: cleanSourceUrl(page.url()), title: (await page.title().catch(() => '')).slice(0, 120) });
+  };
+  /** Saves a masked screenshot of the page as it is, for the user to see why something failed. */
+  const debugShot = async () => {
+    try {
+      if (!page || debugN >= 20) return '';
+      await maskPage(page, words);
+      const name = 'debug-' + (++debugN) + '.png';
+      fs.mkdirSync(path.join(outDir, '_debug'), { recursive: true });
+      fs.writeFileSync(path.join(outDir, '_debug', name), await page.screenshot({ type: 'png' }));
+      return name;
+    } catch (_) { return ''; }
+  };
+  const acting = async (fn) => { state.acting = true; try { return await fn(); } finally { state.acting = false; } };
+  const signInUnguarded = async () => {
+    const was = state.guard;
+    state.guard = false;
+    try { await acting(() => signIn(page, creds.username, creds.password)); } finally { state.guard = was; }
+  };
 
   const browser = await chromium.launch({ args: ['--disable-dev-shm-usage'] });
   try {
@@ -339,29 +367,67 @@ async function runCapture(job, creds, outDir) {
       viewport: { width: size.width, height: size.height }, deviceScaleFactor: 1,
       userAgent: ua, locale: 'en-US', acceptDownloads: false,
     });
-    const page = await context.newPage();
+    page = await context.newPage();
     page.setDefaultTimeout(15000);
     context.on('page', (p) => { if (p !== page) { popup = true; p.close().catch(() => {}); } });
     page.on('dialog', (d) => d.dismiss().catch(() => {}));
 
-    job.stage = 'signing in';
-    await page.goto(job.environment_url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-    await settle(page);
-    const hasCreds = !!(creds.username || creds.password);
-    if (hasCreds) await signIn(page, creds.username, creds.password);
-    const home = page.url();
-    allowedHosts.add(new URL(home).host);
-
-    // From here on the browser refuses requests that change data.
+    // After the first sign-in the browser refuses requests that change data:
+    // DELETE, PUT and PATCH always; a form post that loads a new page only
+    // when the service itself is not acting (a page posting on its own).
+    // Older web apps move between pages with form posts, so those are allowed
+    // while the service opens a listed page or clicks a safe menu step.
     await context.route('**/*', (route) => {
       const r = route.request();
       const m = r.method();
-      if (m === 'DELETE' || m === 'PUT' || m === 'PATCH' || (m === 'POST' && r.isNavigationRequest())) {
+      const write = m === 'DELETE' || m === 'PUT' || m === 'PATCH';
+      const postNav = m === 'POST' && r.isNavigationRequest() && !state.acting;
+      if (state.guard && (write || postNav)) {
         job.blocked_requests++;
+        if (job.blocked.length < 20) job.blocked.push(m + ' ' + cleanSourceUrl(r.url()));
         return route.abort('blockedbyclient');
       }
       return route.continue();
     });
+
+    job.stage = 'signing in';
+    const hasCreds = !!(creds.username || creds.password);
+    try {
+      await acting(async () => {
+        await page.goto(job.environment_url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await settle(page);
+      });
+      await note('opened environment');
+      if (hasCreds) await signInUnguarded();
+    } catch (e) {
+      await note('sign-in failed');
+      job.debug_image = await debugShot();
+      throw e;
+    }
+    const home = page.url();
+    allowedHosts.add(new URL(home).host);
+    await note('signed in');
+    state.guard = true;
+
+    // "/" or the environment address itself means the page reached after sign-in.
+    const isHome = (t) => t.raw === '/' || (t.url && t.url.replace(/\/+$/, '') === job.environment_url.replace(/\/+$/, ''));
+    const open = async (t) => {
+      await acting(async () => {
+        if (t.url) {
+          await page.goto(isHome(t) ? home : t.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await settle(page);
+        } else {
+          await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await settle(page);
+          for (const s of t.steps) {
+            await clickStep(page, s);
+            await note('clicked "' + s + '"');
+            if (popup) throw new CaptureError('"' + s + '" opens a new window, which this version does not capture.');
+          }
+        }
+      });
+      await note('opened ' + t.raw);
+    };
 
     job.stage = 'capturing';
     for (const t of job.targets) {
@@ -372,23 +438,16 @@ async function runCapture(job, creds, outDir) {
           const u = new URL(t.url);
           if (!allowedHosts.has(u.host)) throw new CaptureError('This address is on a different site from the environment, so it was not opened.');
           if (DANGER.test(decodeURIComponent(u.pathname + ' ' + u.search).replace(/[-_/]+/g, ' '))) throw new CaptureError('This address looks like it could change data, so it was not opened.');
-          await page.goto(t.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
-          await settle(page);
         } else {
           for (const s of t.steps) if (DANGER.test(s)) throw new CaptureError('"' + s + '" could change data, so it was not clicked.');
-          await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 45000 });
-          await settle(page);
-          for (const s of t.steps) {
-            await clickStep(page, s);
-            if (popup) throw new CaptureError('"' + s + '" opens a new window, which this version does not capture.');
-          }
         }
+        await open(t);
         if (hasCreds && (await onSignInPage(page))) {
           // Session ended mid-run: sign in once more, then retry this target.
-          await signIn(page, creds.username, creds.password);
-          if (t.url) { await page.goto(t.url, { waitUntil: 'domcontentloaded', timeout: 45000 }); await settle(page); }
-          else { await page.goto(home); await settle(page); for (const s of t.steps) await clickStep(page, s); }
-          if (await onSignInPage(page)) throw new CaptureError('The site signed the session out and it could not be restored.');
+          await note('found sign-in page');
+          await signInUnguarded();
+          await open(t);
+          if (await onSignInPage(page)) throw new CaptureError('The site showed its sign-in page again after signing in. The session could not be kept.');
         }
         if (!allowedHosts.has(new URL(page.url()).host)) throw new CaptureError('This step left the environment for another site, so it was not captured.');
 
@@ -431,7 +490,10 @@ async function runCapture(job, creds, outDir) {
           elements: facts.controls, source_url: cleanSourceUrl(page.url()), warning,
         });
       } catch (e) {
-        job.not_captured.push({ target: t.raw, reason: e.userMessage || ('The page could not be captured: ' + String(e.message || e).split('\n')[0].slice(0, 200)) });
+        const refused = e.userMessage && /could change data|different site/.test(e.userMessage);
+        const entry = { target: t.raw, reason: e.userMessage || ('The page could not be captured: ' + String(e.message || e).split('\n')[0].slice(0, 200)) };
+        if (!refused) { await note('failed ' + t.raw); entry.debug_image = await debugShot(); }
+        job.not_captured.push(entry);
       }
       job.progress.done++;
     }
