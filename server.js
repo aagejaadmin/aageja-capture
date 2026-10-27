@@ -1,6 +1,14 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.0.1 (October 2026)
+ * AaGeJa Capture Service — v1.0.2 (October 2026)
+ *
+ * v1.0.2
+ *   - A menu step that is not visible opens the site's collapsed menu
+ *     controls (for example the three-line button) one at a time and looks
+ *     again, so "Admin > Users" works on sites that hide their menu.
+ *   - The page reached after sign-in is named "home"; a page title such as
+ *     "Welcome - Site Name" names the screen by its first part; long names are
+ *     cut at a word boundary.
  *
  * v1.0.1 — first run against a real site (Cornerstone training environment)
  *   - "/" or the environment address means the page reached after sign-in.
@@ -52,7 +60,7 @@ const { runCapture, parseTargets, parseSize, CaptureError } = require('./capture
 const png = require('./png-meta');
 const github = require('./storage-github');
 
-const VERSION = '1.0.1';
+const VERSION = '1.0.2';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';

@@ -60,8 +60,17 @@ function parseTargets(text, environmentUrl) {
 
 function slug(s, max = 40) {
   return String(s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase()
-    .replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-    .slice(0, max).replace(/-+$/, '');
+    .replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  if (s.length <= max) return s;
+  // Cut at a word boundary; a single word longer than max is cut at max.
+  const cut = s.slice(0, max + 1);
+  const i = cut.lastIndexOf('-');
+  return (i > 0 ? cut.slice(0, i) : s.slice(0, max)).replace(/-+$/, '');
+}
+
+/** "Welcome - Realize Your Potential: Site Name" -> "Welcome". */
+function titleName(t) {
+  return String(t || '').split(/\s+[-–—|]\s+|:\s+/)[0].trim();
 }
 
 // ── Page helpers ───────────────────────────────────────────────────────────
@@ -150,9 +159,8 @@ async function onSignInPage(page) {
   return !!(await findVisible(page, PASS_SEL));
 }
 
-/** Clicks one menu step by its visible name. Exact match first, then contains. */
-async function clickStep(page, text) {
-  if (DANGER.test(text)) throw new CaptureError('"' + text + '" could change data, so it was not clicked.');
+/** First visible, safe control whose name is the step text. Exact match first, then contains. */
+async function findStep(page, text) {
   const esc = text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const exact = new RegExp('^\\s*' + esc + '\\s*$', 'i');
   const loose = new RegExp(esc, 'i');
@@ -167,15 +175,63 @@ async function clickStep(page, text) {
           if (!(await el.isVisible().catch(() => false))) continue;
           const label = ((await el.innerText().catch(() => '')) || (await el.getAttribute('aria-label').catch(() => '')) || '').trim();
           if (DANGER.test(label)) continue;
-          await el.hover({ timeout: 3000 }).catch(() => {});
-          await el.click({ timeout: 10000 });
-          await settle(page);
-          return;
+          return el;
         }
       }
     }
   }
-  throw new CaptureError('Could not find "' + text + '" on the page.');
+  return null;
+}
+
+/**
+ * Opens a collapsed menu: a visible button or link named like a menu or
+ * navigation control (for example the three-line button) that is not already
+ * open. Returns true if one was clicked.
+ */
+async function openMenus(page, tried) {
+  const SEL = [
+    '[aria-label*="menu" i]', '[aria-label*="navigation" i]', '[title*="menu" i]', '[title*="navigation" i]',
+    '[aria-haspopup="true"][aria-expanded="false"]', 'button[aria-expanded="false"][aria-controls]',
+    '.hamburger', '.navbar-toggler', '.menu-toggle', '[class*="hamburger" i]',
+  ].join(', ');
+  for (const frame of page.frames()) {
+    const loc = frame.locator(SEL);
+    const n = Math.min(await loc.count().catch(() => 0), 15);
+    for (let i = 0; i < n; i++) {
+      const el = loc.nth(i);
+      if (!(await el.isVisible().catch(() => false))) continue;
+      if ((await el.getAttribute('aria-expanded').catch(() => null)) === 'true') continue;
+      const tag = await el.evaluate((e) => e.tagName).catch(() => '');
+      if (!/^(BUTTON|A|DIV|SPAN|LI|I|SVG)$/i.test(tag)) continue;
+      const label = ((await el.getAttribute('aria-label').catch(() => '')) || (await el.getAttribute('title').catch(() => '')) || (await el.innerText().catch(() => '')) || '').trim();
+      if (DANGER.test(label)) continue;
+      const key = frame.url() + '|' + i + '|' + label;
+      if (tried.has(key)) continue;
+      tried.add(key);
+      await el.click({ timeout: 5000 }).catch(() => {});
+      await page.waitForTimeout(800);
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Clicks one menu step by its visible name. If the step is not visible, opens
+ * the site's collapsed menu controls one at a time and looks again.
+ */
+async function clickStep(page, text) {
+  if (DANGER.test(text)) throw new CaptureError('"' + text + '" could change data, so it was not clicked.');
+  let el = await findStep(page, text);
+  const tried = new Set();
+  for (let i = 0; !el && i < 4; i++) {
+    if (!(await openMenus(page, tried))) break;
+    el = await findStep(page, text);
+  }
+  if (!el) throw new CaptureError('Could not find "' + text + '" on the page.');
+  await el.hover({ timeout: 3000 }).catch(() => {});
+  await el.click({ timeout: 10000 });
+  await settle(page);
 }
 
 /** Closes stray dialogs and toasts, blurs focus, moves the pointer away, scrolls to top. */
@@ -467,9 +523,10 @@ async function runCapture(job, creds, outDir) {
         // names both module and screen. A web address takes the module from
         // the highlighted menu item and the screen from the page heading.
         const urlPath = new URL(page.url()).pathname.split('/').filter(Boolean);
-        const moduleName = t.steps ? t.steps[0] : (facts.active_nav || urlPath[0] || 'general');
-        const screenName = t.steps ? t.steps[t.steps.length - 1]
-          : (facts.h1 || facts.title || urlPath[urlPath.length - 1] || 'page');
+        const home_ = isHome(t);
+        const moduleName = home_ ? 'Home' : t.steps ? t.steps[0] : (facts.active_nav || urlPath[0] || 'general');
+        const screenName = home_ ? 'Home' : t.steps ? t.steps[t.steps.length - 1]
+          : (facts.h1 || titleName(facts.title) || urlPath[urlPath.length - 1] || 'page');
         const folder = slug(moduleName) || 'general';
         let base = [slug(job.product, 30) || 'product', folder, slug(screenName) || 'page'].join('_');
         let filename = base + '.png';
