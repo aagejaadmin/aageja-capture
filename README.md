@@ -19,16 +19,18 @@ Separate from content-api so a browser's memory use never touches content produc
 | Route | Key | What it does |
 |---|---|---|
 | `GET /health` | no | Status |
-| `POST /capture/start` | yes | `{ product, client, environment_url, username, password, targets, image_size, mask_words }` → `{ job_id, status_url }` |
-| `GET /capture/status/:id` | yes | Progress, then `screens[]` (page text for the description step, `preview_url`) and `not_captured[]` |
+| `GET /connect` | no | Connect page: environment address + sign-in → environment connection token (`aag_cp_…`) |
+| `POST /connect/token` | no | `{ environment_url, username, password }` → `{ token }`. Nothing is stored. |
+| `POST /capture/start` | yes | `{ product, client, environment_token, targets, mask_words, library_folder }` → `{ job_id, status_url }`. `environment_url` + `username` + `password` also accepted in place of the token. |
+| `GET /capture/status/:id` | yes | Progress, then `screens[]`, `ai_input` (page text for the description step), `report_md`, `not_captured[]` |
 | `GET /capture/image/:id/:folder/:file` | no | A captured image, for preview (unguessable id, kept 24 hours) |
-| `POST /capture/finalize/:id` | yes | `{ descriptions, storage: { type: "github", repo, branch, folder } }` → `{ library_url, library_json_url, images[] }` |
+| `POST /capture/finalize/:id` | yes | Body: the description step's output as plain text (folder from start), or `{ descriptions, storage }` → `{ library_url, library_json_url, summary_md, images[] }` |
 
 `targets` is one page per line: a full web address, a path starting with `/`, or a menu path such as `Admin > Users`.
 
 ## Rules the code enforces
 
-- **Credentials:** used in the browser only. They are never written, logged or returned.
+- **Credentials:** arrive inside the environment connection token, encrypted with a key derived from `CAPTURE_KEY` (changing `CAPTURE_KEY` invalidates every token). Opened in memory, used in the browser only, never written, logged or returned.
 - **Read-only:**
   - Menu steps and web addresses containing words that change data (delete, save, submit, sign out and similar) are refused before anything is clicked.
   - After sign-in, the browser refuses DELETE, PUT and PATCH requests, and form posts that load a new page.

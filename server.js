@@ -1,6 +1,24 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.0.6 (October 2026)
+ * AaGeJa Capture Service — v1.1.0 (October 2026)
+ *
+ * v1.1.0 — what the Screenshot Library Builder agent needs
+ *   - Connect page (GET /connect, POST /connect/token, no key): turns an
+ *     environment address and its sign-in into an environment connection
+ *     token (aag_cp_...). The token is the encrypted sign-in, keyed from
+ *     CAPTURE_KEY; nothing is stored. The agent sends the token, so a password
+ *     never reaches MindStudio's run history.
+ *   - /capture/start takes environment_token (body or X-AaGeJa-Token header);
+ *     the environment address comes from the token. It also takes
+ *     library_folder, checked before the capture starts, not after it.
+ *     username/password in the body still work for direct calls.
+ *   - /capture/status adds ai_input (each screen's page text, for the one AI
+ *     step that writes descriptions) and report_md (what was not captured and
+ *     what to check, ready to display).
+ *   - /capture/finalize takes the AI step's output as the whole body, as
+ *     plain text, and saves to the folder given at start. A body that is not
+ *     readable JSON still saves, with descriptions built from the screen name.
+ *     The response adds summary_md, ready to display.
  *
  * v1.0.6
  *   - Before each shot, waits up to 12 seconds until no loading indicator is
@@ -48,6 +66,8 @@
  * memory use can never touch the content production routes.
  *
  *   GET  /health                          Status
+ *   GET  /connect                         Connect page (environment token)
+ *   POST /connect/token                   Address + sign-in -> token
  *   POST /capture/start                   Start a job              (key)
  *   GET  /capture/status/:id              Progress and results     (key)
  *   GET  /capture/image/:id/:folder/:file A captured image, for preview
@@ -81,8 +101,10 @@ const crypto = require('node:crypto');
 const { runCapture, parseTargets, parseSize, CaptureError } = require('./capture');
 const png = require('./png-meta');
 const github = require('./storage-github');
+const envToken = require('./token');
+const connect = require('./connect');
 
-const VERSION = '1.0.6';
+const VERSION = '1.1.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
@@ -135,16 +157,58 @@ function baseUrl(req) {
 
 const today = () => new Date().toISOString().slice(0, 10);
 
-/** Accepts an array, { images: [...] }, or the same as a JSON string (with or without code fences). */
+/**
+ * Accepts an array, { images: [...] }, or the same as text (with or without
+ * code fences or words around it). Anything unreadable gives [] and every
+ * screen falls back to a description built from its screen name.
+ */
 function parseDescriptions(v) {
   let x = v;
   if (typeof x === 'string') {
     const s = x.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     if (!s) return [];
-    try { x = JSON.parse(s); } catch (_) { throw new CaptureError('Descriptions are not valid JSON'); }
+    x = null;
+    try { x = JSON.parse(s); } catch (_) {
+      const a = s.indexOf('['), b = s.lastIndexOf(']');
+      if (a > -1 && b > a) { try { x = JSON.parse(s.slice(a, b + 1)); } catch (_) { x = null; } }
+    }
   }
   if (x && !Array.isArray(x)) x = x.images || x.screens || x.descriptions || [];
   return Array.isArray(x) ? x : [];
+}
+
+const mdCell = (t) => String(t || '').replace(/\|/g, '/').replace(/\s+/g, ' ').trim();
+
+/** "Admin > Users", or just "Home" when module and screen are the same. */
+const screenLabel = (s) => (s.module && s.screen && s.module.toLowerCase() !== s.screen.toLowerCase() ? s.module + ' > ' + s.screen : (s.screen || s.target));
+
+/** Each screen's page text, for the AI step that writes descriptions. */
+function aiInput(job) {
+  return job.screens.map((s, i) => [
+    (i + 1) + '. filename: ' + s.filename,
+    '   screen: ' + screenLabel(s),
+    '   page title: ' + (s.page_title || ''),
+    '   headings: ' + (s.headings || []).join(' | '),
+    '   labels: ' + (s.labels || []).slice(0, 20).join(' | '),
+    '   controls: ' + (s.elements || []).slice(0, 25).join(' | '),
+  ].join('\n')).join('\n\n');
+}
+
+/** What was not captured and what to check, as Markdown. Empty when there is nothing to report. */
+function reportMd(job) {
+  const out = [];
+  if (job.not_captured.length) {
+    out.push('**Not captured**', '');
+    for (const n of job.not_captured) out.push('- ' + mdCell(n.target) + ' — ' + mdCell(n.reason));
+    out.push('');
+  }
+  const warn = job.screens.filter((s) => s.warning);
+  if (warn.length) {
+    out.push('**Check these screenshots**', '');
+    for (const s of warn) out.push('- ' + mdCell(screenLabel(s)) + ' — ' + mdCell(s.warning));
+    out.push('');
+  }
+  return out.join('\n');
 }
 
 function publicJob(job, req) {
@@ -169,6 +233,9 @@ function publicJob(job, req) {
     })),
     not_captured: job.not_captured.map((n) => ({ ...n, ...(n.debug_image ? { debug_preview_url: b + '/capture/image/' + job.id + '/_debug/' + n.debug_image } : {}) })),
     error: job.error || null,
+    library_folder: job.storage ? job.storage.folder : '',
+    ai_input: aiInput(job),
+    report_md: reportMd(job),
     debug_preview_url: job.debug_image ? b + '/capture/image/' + job.id + '/_debug/' + job.debug_image : null,
     trace: job.trace,
     blocked: job.blocked,
@@ -223,12 +290,39 @@ setInterval(purge, 3600 * 1000).unref();
 
 // ── Routes ─────────────────────────────────────────────────────────────────
 
+/** Storage for a job: AaGeJa's house repo, a folder inside it. Checked before capturing. */
+function checkStorage(input) {
+  const st = input && typeof input === 'object' ? input : { folder: input };
+  const type = String(st.type || 'github').toLowerCase();
+  if (type !== 'github') throw new CaptureError('This version saves to GitHub only.');
+  const repo = String(st.repo || [...HOUSE_REPOS][0] || '').trim();
+  const branch = String(st.branch || 'main').trim();
+  const folder = String(st.folder || '').trim().replace(/^\/+|\/+$/g, '');
+  if (!folder || !/^[A-Za-z0-9._\/-]+$/.test(folder) || folder.includes('..')) {
+    throw new CaptureError('Library folder must be letters, numbers, hyphens and slashes, for example cornerstone/training-env');
+  }
+  if (!HOUSE_REPOS.has(repo.toLowerCase())) throw new CaptureError('This version can only save to ' + [...HOUSE_REPOS].join(', '));
+  if (!process.env.GITHUB_TOKEN) throw new CaptureError('GitHub is not connected on the capture service.');
+  return { type, repo, branch, folder };
+}
+
 async function start(req, res) {
   const body = parseJson(await readBody(req, 64 * 1024));
   const product = String(body.product || body.product_name || '').trim();
   const client = String(body.client || body.client_name || '').trim();
-  const environmentUrl = String(body.environment_url || '').trim();
+  let environmentUrl = String(body.environment_url || '').trim();
+  let username = String(body.username || '');
+  let password = String(body.password || '');
+  const tok = String(req.headers['x-aageja-token'] || body.environment_token || '').trim();
+  if (tok) {
+    const t = envToken.open(tok);
+    if (!t.ok) throw new CaptureError(t.message);
+    environmentUrl = t.environment_url;
+    username = t.username;
+    password = t.password;
+  }
   if (!product) throw new CaptureError('Product name is required');
+  const storage = (body.library_folder || body.storage) ? checkStorage(body.storage || body.library_folder) : null;
   let env;
   try { env = new URL(environmentUrl); } catch (_) { throw new CaptureError('Environment address must be a full web address starting with https://'); }
   if (env.protocol !== 'https:' && env.protocol !== 'http:') throw new CaptureError('Environment address must start with https://');
@@ -246,7 +340,8 @@ async function start(req, res) {
     product, client, environment_url: env.href, size, mask_words: maskWords, targets,
     progress: { done: 0, total: targets.length, current: '' },
     screens: [], not_captured: [], masked: 0, blocked_requests: 0, blocked: [], trace: [], debug_image: '',
-    _creds: { username: String(body.username || ''), password: String(body.password || '') },
+    storage,
+    _creds: { username, password },
   };
   jobs.set(id, job);
   queue.push(job);
@@ -264,21 +359,16 @@ async function finalize(req, res, job) {
   if (job.status !== 'captured' && job.status !== 'done') {
     throw new CaptureError(job.status === 'failed' ? 'This capture failed, so there is nothing to save.' : 'This capture is still running. Check its status first.');
   }
-  const body = parseJson(await readBody(req, 1024 * 1024));
-  const storage = body.storage || {};
-  const type = String(storage.type || 'github').toLowerCase();
-  if (type !== 'github') throw new CaptureError('This version saves to GitHub only.');
-  const repo = String(storage.repo || '').trim();
-  const branch = String(storage.branch || 'main').trim();
-  const folder = String(storage.folder || '').trim().replace(/^\/+|\/+$/g, '');
-  if (!folder || !/^[A-Za-z0-9._\/-]+$/.test(folder) || folder.includes('..')) {
-    throw new CaptureError('Library folder must be letters, numbers, hyphens and slashes, for example cornerstone/training-env');
-  }
-  if (!HOUSE_REPOS.has(repo.toLowerCase())) throw new CaptureError('This version can only save to ' + [...HOUSE_REPOS].join(', '));
+  // The body is either { descriptions, storage } or, from the agent, the AI
+  // step's output alone as plain text, with the folder given at start.
+  const raw = await readBody(req, 1024 * 1024);
+  let body = null;
+  try { body = JSON.parse(raw); } catch (_) { body = null; }
+  const wrapped = body && typeof body === 'object' && !Array.isArray(body) && ('descriptions' in body || 'storage' in body);
+  const { repo, branch, folder } = checkStorage((wrapped && body.storage) || job.storage);
   const token = process.env.GITHUB_TOKEN;
-  if (!token) throw new CaptureError('GitHub is not connected on the capture service.');
 
-  const descs = parseDescriptions(body.descriptions);
+  const descs = parseDescriptions(wrapped ? body.descriptions : raw);
   const byName = new Map(descs.filter((d) => d && d.filename).map((d) => [String(d.filename).trim(), d]));
   const date = today();
   const files = [];
@@ -327,7 +417,35 @@ async function finalize(req, res, job) {
     commit, written: rows.length, total_in_library: images.length, descriptions_missing: missing,
   };
   console.log('[job ' + job.id + '] saved ' + rows.length + ' image(s) to ' + repo + '@' + branch + ' (' + commit.slice(0, 7) + ')');
+  const md = [
+    '**Library:** ' + job.library.library_url,
+    '',
+    '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') +
+      (images.length > rows.length ? ' (' + images.length + ' in the library in total)' : '') +
+      ', each ' + job.size.width + ' × ' + job.size.height,
+    '',
+    '| Screen | Description |',
+    '|---|---|',
+  ];
+  rows.forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
+  md.push('');
+  if (missing) md.push('_' + missing + ' description' + (missing === 1 ? ' was' : 's were') + ' not written, so ' + (missing === 1 ? 'it uses' : 'they use') + ' the screen name._', '');
+  const rep = reportMd(job);
+  if (rep) md.push(rep);
+  job.library.summary_md = md.join('\n');
   send(res, 200, { ...job.library, images: rows, not_captured: library.not_captured });
+}
+
+async function mintToken(req, res) {
+  const body = parseJson(await readBody(req, 8 * 1024));
+  const environmentUrl = String(body.environment_url || '').trim();
+  let env;
+  try { env = new URL(environmentUrl); } catch (_) { throw new CaptureError('Enter the full environment address, starting with https://'); }
+  if (env.protocol !== 'https:') throw new CaptureError('The environment address must start with https://');
+  const username = String(body.username || '');
+  const password = String(body.password || '');
+  if (!username.trim() || !password) throw new CaptureError('Enter the username and the password.');
+  send(res, 200, { token: envToken.mint({ environment_url: env.href, username, password }), environment: env.host });
 }
 
 const server = http.createServer(async (req, res) => {
@@ -339,6 +457,14 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, { status: 'ok', service: 'AaGeJa Capture Service', version: VERSION,
         running: !!running, queued: queue.length, key_set: !!CAPTURE_KEY, github: !!process.env.GITHUB_TOKEN });
     }
+
+    if (req.method === 'GET' && (p === '/connect' || p === '/connect/')) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store',
+        'X-Frame-Options': 'DENY', 'Referrer-Policy': 'no-referrer',
+        'Content-Security-Policy': "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'none'; frame-ancestors 'none'" });
+      return res.end(connect.page());
+    }
+    if (req.method === 'POST' && p === '/connect/token') return await mintToken(req, res);
 
     let m = p.match(/^\/capture\/image\/([a-f0-9]{24})\/([^/]+)\/([^/]+\.png)$/);
     if (req.method === 'GET' && m) {
