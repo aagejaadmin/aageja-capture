@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.0.5 (October 2026)
+ * AaGeJa Capture Service — v1.0.6 (October 2026)
+ *
+ * v1.0.6
+ *   - Before each shot, waits up to 12 seconds until no loading indicator is
+ *     on screen (placeholder bars, shimmer, spinners, progress bars, busy
+ *     regions) and the page text is unchanged across three checks a second
+ *     apart. A page still loading after that is captured and flagged. Found
+ *     on Cornerstone's Goals page, captured with grey placeholder bars.
  *
  * v1.0.5
  *   - Stray pop-ups are cleared once, before the first menu click. v1.0.4
@@ -75,7 +82,7 @@ const { runCapture, parseTargets, parseSize, CaptureError } = require('./capture
 const png = require('./png-meta');
 const github = require('./storage-github');
 
-const VERSION = '1.0.5';
+const VERSION = '1.0.6';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';

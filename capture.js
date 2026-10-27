@@ -275,6 +275,47 @@ async function cleanPage(page, size, keepOpen) {
   await page.waitForTimeout(300);
 }
 
+/**
+ * Waits until the page has finished drawing: no visible loading indicators
+ * (placeholder bars, shimmer, spinners, progress bars, busy regions) and the
+ * on-screen text unchanged across three checks a second apart. Gives up after
+ * maxMs and returns whether the page was still loading.
+ */
+async function waitForQuiet(page, maxMs = 12000) {
+  const probe = () => {
+    const SEL = '[aria-busy="true"], [role=progressbar], [class*="skeleton" i], [class*="shimmer" i], [class*="placeholder" i], [class*="spinner" i], [class*="loader" i], [class*="loading" i]';
+    const vis = (el) => {
+      const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+      return r.width > 4 && r.height > 4 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05 &&
+        r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+    };
+    let busy = 0;
+    for (const el of document.querySelectorAll(SEL)) {
+      if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'IMG') continue;
+      if (vis(el)) busy++;
+    }
+    return { busy, text: (document.body ? document.body.innerText : '').length };
+  };
+  const sample = async () => {
+    let busy = 0, text = 0;
+    for (const f of page.frames()) {
+      const x = await f.evaluate(probe).catch(() => null);
+      if (x) { busy += x.busy; text += x.text; }
+    }
+    return { busy, text };
+  };
+  const end = Date.now() + maxMs;
+  let last = null, same = 0, s = null;
+  while (Date.now() < end) {
+    s = await sample();
+    same = last && s.text === last.text ? same + 1 : 0;
+    if (s.busy === 0 && same >= 2) return false;
+    last = s;
+    await page.waitForTimeout(1000);
+  }
+  return true;
+}
+
 /** Replaces email addresses, phone numbers and the user's own words on screen. */
 function maskInPage(words) {
   const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
@@ -535,6 +576,7 @@ async function runCapture(job, creds, outDir) {
         }
         if (!allowedHosts.has(new URL(page.url()).host)) throw new CaptureError('This step left the environment for another site, so it was not captured.');
 
+        const stillLoading = await waitForQuiet(page);
         await cleanPage(page, size, keepOpen);
         let facts = await pageFacts(page);
         if (facts.body_text < 40) {
@@ -545,7 +587,8 @@ async function runCapture(job, creds, outDir) {
         }
         job.masked += await maskPage(page, words);
         facts = await pageFacts(page);
-        const warning = facts.body_text < 40 ? 'The page looked empty when it was captured. Check this image.' : '';
+        const warning = facts.body_text < 40 ? 'The page looked empty when it was captured. Check this image.'
+          : stillLoading ? 'The page was still loading after 12 seconds when it was captured. Check this image.' : '';
 
         // Names come from what the user typed where possible: a menu path
         // names both module and screen. A web address takes the module from
