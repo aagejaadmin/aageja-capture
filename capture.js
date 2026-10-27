@@ -3,13 +3,19 @@
  * Browser side of a capture job: sign in, visit each target, clean the page,
  * mask personal details, read what is on screen, take the screenshot.
  *
- * Read-only by construction:
+ * What the service does on the site, and what it does not:
  *   - The only typing is the username and password at sign-in.
- *   - Menu steps and URLs whose words could change data are refused, before
- *     anything is clicked or opened (DANGER below).
- *   - After sign-in, the browser itself refuses DELETE, PUT and PATCH
- *     requests and form posts that would load a new page.
+ *   - It only opens pages and clicks menu items. Menu steps and addresses
+ *     whose words could change data are refused before anything is clicked
+ *     or opened (DANGER below).
+ *   - After sign-in, the browser refuses DELETE, PUT and PATCH requests, and
+ *     form posts that load a new page when the service did not start them.
+ *   - Pages still make their own background requests while they load, as
+ *     they do for any person viewing them. Every one that is not a plain read
+ *     (GET) is recorded and listed in the run report.
  *   - New windows a click opens are closed, not followed.
+ *   - Requests to addresses that are not on the public internet (this
+ *     machine, private networks, cloud-internal names) are refused.
  */
 
 const { chromium } = require('playwright');
@@ -59,7 +65,7 @@ function parseTargets(text, environmentUrl) {
 }
 
 function slug(s, max = 40) {
-  return String(s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase()
+  s = String(s || '').normalize('NFKD').replace(/[̀-ͯ]/g, '').toLowerCase()
     .replace(/&/g, ' and ').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
   if (s.length <= max) return s;
   // Cut at a word boundary; a single word longer than max is cut at max.
@@ -433,6 +439,38 @@ function cleanSourceUrl(u) {
   try { const x = new URL(u); return x.origin + x.pathname; } catch (_) { return ''; }
 }
 
+/** Path only, no site and no query string: what a saved library may record. */
+function pathOnly(u) {
+  try { return new URL(u).pathname; } catch (_) { return ''; }
+}
+
+// ── Addresses that are not on the public internet ──────────────────────────
+
+const ALLOW_LOCAL = process.env.CAPTURE_ALLOW_LOCAL === '1';
+
+/** True for an IP address on this machine, a private network or a reserved range. */
+function isPrivateIp(ip) {
+  const v = String(ip || '').toLowerCase().replace(/^\[|\]$/g, '');
+  const m4 = v.replace(/^::ffff:/, '').match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (m4) {
+    const [a, b] = [Number(m4[1]), Number(m4[2])];
+    return a === 0 || a === 10 || a === 127 || a >= 224 ||
+      (a === 100 && b >= 64 && b <= 127) || (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) ||
+      (a === 198 && (b === 18 || b === 19));
+  }
+  if (!v.includes(':')) return false;
+  return v === '::' || v === '::1' || /^f[cd]/.test(v) || /^fe[89ab]/.test(v);
+}
+
+/** True for a host name the browser must never reach: this machine or an internal network. */
+function isInternalName(host) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '').replace(/\.$/, '');
+  if (!h) return true;
+  if (/^[\d.]+$/.test(h) || h.includes(':')) return isPrivateIp(h);
+  return h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.internal') || h.endsWith('.local') || !h.includes('.');
+}
+
 // ── Job ────────────────────────────────────────────────────────────────────
 
 /**
@@ -462,6 +500,12 @@ async function runCapture(job, creds, outDir) {
     try {
       if (!page || debugN >= 20) return '';
       await maskPage(page, words);
+      // A failed sign-in leaves the username in its field: clear every typed value first.
+      await page.evaluate(() => {
+        for (const el of document.querySelectorAll('input, textarea')) {
+          if (!/^(hidden|checkbox|radio|submit|button|image|reset)$/i.test(el.type || '')) el.value = '';
+        }
+      }).catch(() => {});
       const name = 'debug-' + (++debugN) + '.png';
       fs.mkdirSync(path.join(outDir, '_debug'), { recursive: true });
       fs.writeFileSync(path.join(outDir, '_debug', name), await page.screenshot({ type: 'png' }));
@@ -488,20 +532,36 @@ async function runCapture(job, creds, outDir) {
     context.on('page', (p) => { if (p !== page) { popup = true; p.close().catch(() => {}); } });
     page.on('dialog', (d) => d.dismiss().catch(() => {}));
 
-    // After the first sign-in the browser refuses requests that change data:
-    // DELETE, PUT and PATCH always; a form post that loads a new page only
-    // when the service itself is not acting (a page posting on its own).
-    // Older web apps move between pages with form posts, so those are allowed
-    // while the service opens a listed page or clicks a safe menu step.
+    // Addresses that are not on the public internet are refused at all times.
+    // After the first sign-in the browser also refuses DELETE, PUT and PATCH,
+    // and a form post that loads a new page when the service itself is not
+    // acting (a page posting on its own). Older web apps move between pages
+    // with form posts, so those are allowed while the service opens a listed
+    // page or clicks a safe menu step. Every other request that is not a plain
+    // read is let through, recorded, and listed in the run report.
+    const seen = new Set();
     await context.route('**/*', (route) => {
       const r = route.request();
       const m = r.method();
+      let host = '';
+      try { host = new URL(r.url()).hostname; } catch (_) {}
+      if (!ALLOW_LOCAL && /^https?:/i.test(r.url()) && isInternalName(host)) {
+        job.blocked_requests++;
+        if (job.blocked.length < 20) job.blocked.push(m + ' ' + cleanSourceUrl(r.url()) + ' (not a public address)');
+        return route.abort('blockedbyclient');
+      }
       const write = m === 'DELETE' || m === 'PUT' || m === 'PATCH';
       const postNav = m === 'POST' && r.isNavigationRequest() && !state.acting;
       if (state.guard && (write || postNav)) {
         job.blocked_requests++;
         if (job.blocked.length < 20) job.blocked.push(m + ' ' + cleanSourceUrl(r.url()));
         return route.abort('blockedbyclient');
+      }
+      // A form post the service's own menu click started is not the page's doing.
+      if (state.guard && m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS' && !(r.isNavigationRequest() && state.acting)) {
+        job.background_requests++;
+        const k = m + ' ' + pathOnly(r.url());
+        if (!seen.has(k) && job.background.length < 30) { seen.add(k); job.background.push(k); }
       }
       return route.continue();
     });
@@ -615,7 +675,7 @@ async function runCapture(job, creds, outDir) {
         job.screens.push({
           folder, filename, module: moduleName, screen: screenName, target: t.raw,
           page_title: facts.title, heading: facts.h1, headings: facts.headings, labels: facts.labels,
-          elements: facts.controls, source_url: cleanSourceUrl(page.url()), warning,
+          elements: facts.controls, source_path: pathOnly(page.url()), warning,
         });
       } catch (e) {
         const refused = e.userMessage && /could change data|different site/.test(e.userMessage);
@@ -631,4 +691,4 @@ async function runCapture(job, creds, outDir) {
   }
 }
 
-module.exports = { runCapture, parseTargets, parseSize, slug, CaptureError, DANGER };
+module.exports = { runCapture, parseTargets, parseSize, slug, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError, DANGER };
