@@ -244,8 +244,17 @@ async function safeClick(el) {
   await el.evaluate((e) => e.click());
 }
 
-/** Closes stray dialogs and toasts, blurs focus, moves the pointer away, scrolls to top. */
-async function cleanPage(page, size) {
+/**
+ * Closes stray dialogs and toasts, blurs focus, moves the pointer away, scrolls
+ * to top. With keepOpen (the last step opened a menu or panel without leaving
+ * the page) only the scroll is done, so what the step opened stays in the shot.
+ */
+async function cleanPage(page, size, keepOpen) {
+  if (keepOpen) {
+    for (const f of page.frames()) await f.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+    await page.waitForTimeout(500);
+    return;
+  }
   await page.keyboard.press('Escape').catch(() => {});
   const containers = ['[role=dialog]', '[role=alertdialog]', '[aria-modal="true"]', '.modal', '.toast', '[role=status]'];
   const closers = ['button[aria-label*="close" i]', 'button[aria-label*="dismiss" i]', '[role=button][aria-label*="close" i]',
@@ -350,7 +359,7 @@ function factsInPage() {
     h1: (all('h1, [role=heading][aria-level="1"]').map(txt).filter(Boolean)[0]) || '',
     headings: uniq(all('h1, h2, h3, [role=heading]').map(txt)).slice(0, 12),
     labels: uniq(all('label, th, legend, dt').map(txt)).slice(0, 25),
-    controls: uniq(controls).slice(0, 30),
+    controls: uniq(controls).slice(0, 60),
     active_nav: active && vis(active) ? txt(active).replace(/(\s+\d+)+$/, '').trim() : '',
     body_text: bodyText,
   };
@@ -375,7 +384,7 @@ async function pageFacts(page) {
   }
   merged.headings = merged.headings.slice(0, 12);
   merged.labels = merged.labels.slice(0, 25);
-  merged.controls = merged.controls.slice(0, 30);
+  merged.controls = merged.controls.slice(0, 60);
   return merged;
 }
 
@@ -477,7 +486,10 @@ async function runCapture(job, creds, outDir) {
 
     // "/" or the environment address itself means the page reached after sign-in.
     const isHome = (t) => t.raw === '/' || (t.url && t.url.replace(/\/+$/, '') === job.environment_url.replace(/\/+$/, ''));
+    // Returns true when the last menu step opened something without leaving
+    // the page (a menu, panel or tab), so clean-up leaves it open.
     const open = async (t) => {
+      let keepOpen = false;
       await acting(async () => {
         if (t.url) {
           await page.goto(isHome(t) ? home : t.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -485,14 +497,20 @@ async function runCapture(job, creds, outDir) {
         } else {
           await page.goto(home, { waitUntil: 'domcontentloaded', timeout: 45000 });
           await settle(page);
-          for (const s of t.steps) {
-            await clickStep(page, s);
-            await note('clicked "' + s + '"');
-            if (popup) throw new CaptureError('"' + s + '" opens a new window, which this version does not capture.');
+          for (let i = 0; i < t.steps.length; i++) {
+            const before = page.url();
+            // Clear stray pop-ups before the last click, so that if the click
+            // opens a menu, the menu can be left open and the page still clean.
+            if (i === t.steps.length - 1) await cleanPage(page, size, false);
+            await clickStep(page, t.steps[i]);
+            await note('clicked "' + t.steps[i] + '"');
+            if (popup) throw new CaptureError('"' + t.steps[i] + '" opens a new window, which this version does not capture.');
+            if (i === t.steps.length - 1) keepOpen = page.url() === before;
           }
         }
       });
       await note('opened ' + t.raw);
+      return keepOpen;
     };
 
     job.stage = 'capturing';
@@ -507,23 +525,23 @@ async function runCapture(job, creds, outDir) {
         } else {
           for (const s of t.steps) if (DANGER.test(s)) throw new CaptureError('"' + s + '" could change data, so it was not clicked.');
         }
-        await open(t);
+        let keepOpen = await open(t);
         if (hasCreds && (await onSignInPage(page))) {
           // Session ended mid-run: sign in once more, then retry this target.
           await note('found sign-in page');
           await signInUnguarded();
-          await open(t);
+          keepOpen = await open(t);
           if (await onSignInPage(page)) throw new CaptureError('The site showed its sign-in page again after signing in. The session could not be kept.');
         }
         if (!allowedHosts.has(new URL(page.url()).host)) throw new CaptureError('This step left the environment for another site, so it was not captured.');
 
-        await cleanPage(page, size);
+        await cleanPage(page, size, keepOpen);
         let facts = await pageFacts(page);
         if (facts.body_text < 40) {
           // Looks empty: give a slow page more time once before capturing.
           await page.waitForTimeout(4000);
           await settle(page);
-          await cleanPage(page, size);
+          await cleanPage(page, size, keepOpen);
         }
         job.masked += await maskPage(page, words);
         facts = await pageFacts(page);

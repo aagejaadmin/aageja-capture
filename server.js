@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.0.3 (October 2026)
+ * AaGeJa Capture Service — v1.0.4 (October 2026)
+ *
+ * v1.0.4
+ *   - When the last menu step opens something without leaving the page (a
+ *     menu, panel or tab), it stays open in the shot. Stray pop-ups are
+ *     cleared before that last click instead of after it.
+ *   - Up to 60 on-screen controls are recorded per image (was 30).
  *
  * v1.0.3
  *   - A safe step whose normal click times out (something on the page sits
@@ -64,7 +70,7 @@ const { runCapture, parseTargets, parseSize, CaptureError } = require('./capture
 const png = require('./png-meta');
 const github = require('./storage-github');
 
-const VERSION = '1.0.3';
+const VERSION = '1.0.4';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
