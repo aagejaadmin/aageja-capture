@@ -1,6 +1,6 @@
 {
   "name": "aageja-capture",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "AaGeJa Capture Service: server side of the Screenshot Library Builder agent.",
   "main": "server.js",
   "private": true,

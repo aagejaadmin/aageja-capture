@@ -208,7 +208,7 @@ async function openMenus(page, tried) {
       const key = frame.url() + '|' + i + '|' + label;
       if (tried.has(key)) continue;
       tried.add(key);
-      await el.click({ timeout: 5000 }).catch(() => {});
+      await safeClick(el).catch(() => {});
       await page.waitForTimeout(800);
       return true;
     }
@@ -230,8 +230,18 @@ async function clickStep(page, text) {
   }
   if (!el) throw new CaptureError('Could not find "' + text + '" on the page.');
   await el.hover({ timeout: 3000 }).catch(() => {});
-  await el.click({ timeout: 10000 });
+  await safeClick(el);
   await settle(page);
+}
+
+/**
+ * Clicks an element that has already passed the safety checks. If something
+ * on the page sits over it and the normal click times out, the element is
+ * clicked directly instead.
+ */
+async function safeClick(el) {
+  try { await el.click({ timeout: 6000 }); return; } catch (_) {}
+  await el.evaluate((e) => e.click());
 }
 
 /** Closes stray dialogs and toasts, blurs focus, moves the pointer away, scrolls to top. */

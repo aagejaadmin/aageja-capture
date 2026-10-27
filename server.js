@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.0.2 (October 2026)
+ * AaGeJa Capture Service — v1.0.3 (October 2026)
+ *
+ * v1.0.3
+ *   - A safe step whose normal click times out (something on the page sits
+ *     over it) is clicked directly instead. Found on Cornerstone's menu button.
  *
  * v1.0.2
  *   - A menu step that is not visible opens the site's collapsed menu
@@ -60,7 +64,7 @@ const { runCapture, parseTargets, parseSize, CaptureError } = require('./capture
 const png = require('./png-meta');
 const github = require('./storage-github');
 
-const VERSION = '1.0.2';
+const VERSION = '1.0.3';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
