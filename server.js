@@ -1,6 +1,21 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.2.0 (October 2026)
+ * AaGeJa Capture Service — v1.3.0 (October 2026)
+ *
+ * v1.3.0 — the library is kept here for 24 hours, nowhere else
+ *   - Every library is kept by this service for RETENTION_HOURS (24) on links
+ *     anyone with the link can open: library.json, each image, and a zip of
+ *     everything. The links carry a 128-bit random token and stop working
+ *     when the time is up. The customer downloads the zip and puts the
+ *     screenshots in their own folder; the Storyboard Designer reads a GitHub,
+ *     S3, Google Cloud Storage or web folder.
+ *   - library.json lists each image by a link relative to itself
+ *     ("home/x.png"), so it still works after the folder is uploaded anywhere.
+ *     The zip adds a READ ME saying how.
+ *   - Saving to GitHub is removed, with the library_folder field and the
+ *     GITHUB_TOKEN variable. No account or key of AaGeJa's touches a
+ *     customer's storage. (The GitHub, S3 and Google Cloud Storage saving
+ *     built for 1.3.0 is kept on the capture-storage-options branch.)
  *
  * v1.2.0
  *   - The sign-in comes with each run: /capture/start takes environment_url,
@@ -85,7 +100,9 @@
  *   GET  /capture/status/:id              Progress and results     (key)
  *   GET  /capture/image/:id/:folder/:file A captured image, for preview (key)
  *   POST /capture/finalize/:id            Descriptions in -> metadata,
- *                                         library.json, one commit (key)
+ *                                         library.json, zip        (key)
+ *   GET  /library/:token/...              The library, for 24 hours: library.json,
+ *                                         screenshots.zip and each image
  *
  * Start a job, then check back: a capture outlives any single HTTP request.
  * One job runs at a time; others wait in order.
@@ -97,10 +114,7 @@
  * Environment variables:
  *   CAPTURE_KEY          Required. Callers send it as X-AaGeJa-Key. Unset
  *                        means every keyed route refuses.
- *   GITHUB_TOKEN         The capture service's own GitHub account: a classic
- *                        token with the public_repo scope. Customers add that
- *                        account to their repository with write access.
- *   RETENTION_HOURS      Hours a job and its images are kept (default 24).
+ *   RETENTION_HOURS      Hours a job and its library are kept (default 24).
  *   WORK_DIR             Where images wait between capture and finalize
  *                        (default /tmp/capture).
  *   CAPTURE_ALLOW_LOCAL  Set to 1 only on a test machine: allows http:// and
@@ -116,17 +130,19 @@ const crypto = require('node:crypto');
 const dns = require('node:dns').promises;
 const { runCapture, parseTargets, parseSize, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError } = require('./capture');
 const png = require('./png-meta');
-const github = require('./storage-github');
+const zip = require('./zip');
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
-const RETENTION_MS = (Number(process.env.RETENTION_HOURS) || 24) * 3600 * 1000;
+const RETENTION_HOURS = Number(process.env.RETENTION_HOURS) || 24;
+const RETENTION_MS = RETENTION_HOURS * 3600 * 1000;
 
 fs.mkdirSync(WORK_DIR, { recursive: true });
 
 const jobs = new Map();
+const shares = new Map();   // library token -> job id
 const queue = [];
 let running = null;
 
@@ -262,7 +278,6 @@ function publicJob(job, req) {
     })),
     not_captured: job.not_captured.map((n) => ({ ...n, ...(n.debug_image ? { debug_preview_url: b + '/capture/image/' + job.id + '/_debug/' + n.debug_image } : {}) })),
     error: job.error || null,
-    library_folder: job.storage ? github.treeUrl(job.storage.repo, job.storage.branch, job.storage.folder) : '',
     ai_input: aiInput(job),
     report_md: reportMd(job),
     debug_preview_url: job.debug_image ? b + '/capture/image/' + job.id + '/_debug/' + job.debug_image : null,
@@ -302,68 +317,27 @@ async function pump() {
   }
 }
 
+/** A job ends RETENTION_HOURS after it finished; a saved library, that long after it was saved. */
+const jobEnds = (job) => job.expires || ((job.finished || job.created) + RETENTION_MS);
+
 function purge() {
-  const cutoff = Date.now() - RETENTION_MS;
+  const now = Date.now();
   for (const [id, job] of jobs) {
     if (job === running || job.status === 'queued') continue;
-    if ((job.finished || job.created) < cutoff) {
+    if (jobEnds(job) < now) {
       fs.rmSync(path.join(WORK_DIR, id), { recursive: true, force: true });
+      if (job.share) shares.delete(job.share);
       jobs.delete(id);
     }
   }
   for (const name of fs.readdirSync(WORK_DIR)) if (!jobs.has(name)) {
     const p = path.join(WORK_DIR, name);
-    try { if (fs.statSync(p).mtimeMs < cutoff) fs.rmSync(p, { recursive: true, force: true }); } catch (_) {}
+    try { if (fs.statSync(p).mtimeMs < now - RETENTION_MS) fs.rmSync(p, { recursive: true, force: true }); } catch (_) {}
   }
 }
-setInterval(purge, 3600 * 1000).unref();
+setInterval(purge, 10 * 60 * 1000).unref();
 
 // ── Routes ─────────────────────────────────────────────────────────────────
-
-const FOLDER_EXAMPLE = 'https://github.com/your-organization/screenshots/tree/main/product-name';
-
-/**
- * The library folder: a github.com link to a folder (or a whole repository)
- * that the person copies from their browser. Returns { repo, branch, folder };
- * branch is '' when the link names none (the repository's default is used).
- */
-function parseFolderLink(link) {
-  const bad = () => new CaptureError('The library folder must be a GitHub folder link, for example ' + FOLDER_EXAMPLE);
-  let u;
-  try { u = new URL(String(link || '').trim()); } catch (_) { throw bad(); }
-  if (u.protocol !== 'https:' || u.hostname.toLowerCase() !== 'github.com') throw bad();
-  let parts;
-  try { parts = u.pathname.split('/').filter(Boolean).map(decodeURIComponent); } catch (_) { throw bad(); }
-  if (parts.length < 2) throw bad();
-  const repo = parts[0] + '/' + parts[1].replace(/\.git$/i, '');
-  let branch = '', folder = '';
-  if (parts.length > 2) {
-    if (parts[2] !== 'tree' || parts.length < 4) {
-      throw new CaptureError('Open the folder on GitHub and copy the address from your browser. It looks like ' + FOLDER_EXAMPLE);
-    }
-    branch = parts[3];
-    folder = parts.slice(4).join('/');
-  }
-  if (!/^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)) throw bad();
-  if (folder && (!/^[A-Za-z0-9._\/-]+$/.test(folder) || folder.split('/').includes('..'))) {
-    throw new CaptureError('Folder names in the library folder may use letters, numbers, dots, hyphens and underscores only.');
-  }
-  return { repo, branch, folder };
-}
-
-/** Storage for a job, checked with GitHub before anything is captured. */
-async function checkStorage(link) {
-  if (!String(link || '').trim()) throw new CaptureError('The library folder is required: a GitHub folder link, for example ' + FOLDER_EXAMPLE);
-  const { repo, branch, folder } = parseFolderLink(link);
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) throw new CaptureError('The capture service is not connected to GitHub. Contact AaGeJa.');
-  let b;
-  try { b = await github.checkTarget({ token, repo, branch }); } catch (e) {
-    if (e.userMessage) throw new CaptureError(e.userMessage);
-    throw e;
-  }
-  return { type: 'github', repo, branch: b, folder };
-}
 
 /** The environment must be a named site on the public internet. */
 async function checkEnvironment(raw) {
@@ -390,7 +364,6 @@ async function start(req, res) {
   if (!product) throw new CaptureError('Product name is required');
   if (!username.trim() || !password) throw new CaptureError('Enter the username and the password for the environment.');
   const env = await checkEnvironment(body.environment_url);
-  const storage = await checkStorage(body.library_folder);
   const mode = String(body.mode || 'guided').toLowerCase();
   if (mode !== 'guided') throw new CaptureError('This version captures a list of pages (Guided). Full crawl and Refresh are not available yet.');
 
@@ -406,7 +379,6 @@ async function start(req, res) {
     progress: { done: 0, total: targets.length, current: '' },
     screens: [], not_captured: [], masked: 0, blocked_requests: 0, blocked: [], trace: [], debug_image: '',
     background_requests: 0, background: [],
-    storage,
     _creds: { username, password },
   };
   jobs.set(id, job);
@@ -422,25 +394,25 @@ async function start(req, res) {
 }
 
 async function finalize(req, res, job) {
-  // Saving twice returns the first save: the images are gone once saved.
+  // Saving twice returns the first save.
   if (job.status === 'done' && job.library) return send(res, 200, { ...job.library, images: job.library_rows || [], not_captured: job.not_captured.map((n) => ({ target: n.target, reason: n.reason })) });
   if (job.status !== 'captured') {
     throw new CaptureError(job.status === 'failed' ? 'This capture failed, so there is nothing to save.' : 'This capture is still running. Check its status first.');
   }
   // The body is the AI step's output as plain text (from the agent), or
-  // { descriptions }. The library folder is the one checked at start.
+  // { descriptions }.
   const raw = await readBody(req, 1024 * 1024);
   let body = null;
   try { body = JSON.parse(raw); } catch (_) { body = null; }
   const wrapped = body && typeof body === 'object' && !Array.isArray(body) && 'descriptions' in body;
-  const { repo, branch, folder } = job.storage;
-  const token = process.env.GITHUB_TOKEN;
-  if (!token) throw new CaptureError('The capture service is not connected to GitHub. Contact AaGeJa.');
-  const inFolder = (p) => (folder ? folder + '/' : '') + p;
+  const share = crypto.randomBytes(16).toString('hex');
+  const base = baseUrl(req) + '/library/' + share + '/';
+  const encPath = (p) => p.split('/').map(encodeURIComponent).join('/');
 
   const descs = parseDescriptions(wrapped ? body.descriptions : raw);
   const byName = new Map(descs.filter((d) => d && d.filename).map((d) => [String(d.filename).trim(), d]));
   const date = today();
+  const dir = path.join(WORK_DIR, job.id);
   const files = [];
   const rows = [];
   let missing = 0;
@@ -450,68 +422,108 @@ async function finalize(req, res, job) {
     const fallback = s.module.toLowerCase() === s.screen.toLowerCase() ? s.screen : s.module + ' — ' + s.screen;
     const description = String(d.description || fallback).trim();
     const alt = String(d.alt || description).trim();
-    const filePath = inFolder(s.folder + '/' + s.filename);
-    const src = fs.readFileSync(path.join(WORK_DIR, job.id, s.folder, s.filename));
-    const out = png.embed(src, {
+    const rel = s.folder + '/' + s.filename;
+    const out = png.embed(fs.readFileSync(path.join(dir, s.folder, s.filename)), {
       Title: s.screen, Description: description, Alt: alt, Screen: s.module + ' > ' + s.screen,
       Source: s.source_path, Captured: date, Elements: s.elements.join('; '),
       Software: 'AaGeJa Screenshot Library Builder ' + VERSION,
     });
-    files.push({ path: filePath, content: out });
+    files.push({ name: rel, content: out });
+    // url is relative to library.json, so the file still works once the
+    // folder is uploaded somewhere else.
     rows.push({
-      folder: s.folder, filename: s.filename, url: github.rawUrl(repo, branch, filePath),
+      folder: s.folder, filename: s.filename, url: encPath(rel),
       description, alt, elements: s.elements, module: s.module, screen: s.screen,
       page_title: s.page_title, source_path: s.source_path, captured: date,
     });
   }
-
-  let commit, images;
+  const library = {
+    product: job.product, client: job.client,
+    captured: date, image_size: job.size.width + 'x' + job.size.height, count: rows.length,
+    images: rows, not_captured: job.not_captured.map((n) => ({ target: n.target, reason: n.reason })),
+  };
+  const libraryJson = Buffer.from(JSON.stringify(library, null, 2) + '\n', 'utf8');
+  const readMe = Buffer.from([
+    'Screenshot library: ' + job.product + (job.client ? ' (' + job.client + ')' : '') + ', ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', captured ' + date + '.',
+    '',
+    'To keep these screenshots and use them in storyboards:',
+    '',
+    '1. Unzip this file. Keep the folders as they are. library.json lists every screenshot with its description.',
+    '2. Upload everything to a folder anyone can open by link: a public GitHub repository, a public Amazon S3 or Google Cloud Storage bucket, or a public web folder. Google Drive, SharePoint and OneDrive cannot be used: storyboards and slide decks cannot open images from them by link.',
+    '3. In the Storyboard Designer, paste the link into the Screenshot Library URL field: for GitHub, the link to the folder; for anywhere else, the link to library.json in it.',
+    '',
+  ].join('\r\n'), 'utf8');
   try {
-    // Merge with a library already in the folder: same file replaces its row,
-    // every other row is kept. Nothing is deleted.
-    const existing = await github.readLibrary({ token, repo, branch, folder });
-    const keep = existing && Array.isArray(existing.images)
-      ? existing.images.filter((r) => !rows.some((x) => x.folder === r.folder && x.filename === r.filename)) : [];
-    images = keep.concat(rows).sort((a, b) => String(a.folder).localeCompare(String(b.folder)) || String(a.filename).localeCompare(String(b.filename)));
-    const library = {
-      product: job.product, client: job.client,
-      captured: date, image_size: job.size.width + 'x' + job.size.height, count: images.length,
-      images, not_captured: job.not_captured.map((n) => ({ target: n.target, reason: n.reason })),
-    };
-    files.push({ path: inFolder('library.json'), content: Buffer.from(JSON.stringify(library, null, 2) + '\n', 'utf8') });
-    const msg = 'Screenshot library: ' + job.product + (job.client ? ' (' + job.client + ')' : '') + ', ' + rows.length + ' screen(s), ' + date;
-    ({ commit } = await github.commitFiles({ token, repo, branch, files, message: msg }));
+    for (const f of files) fs.writeFileSync(path.join(dir, ...f.name.split('/')), f.content);
+    fs.writeFileSync(path.join(dir, 'library.json'), libraryJson);
+    fs.writeFileSync(path.join(dir, 'screenshots.zip'), zip.build([...files, { name: 'library.json', content: libraryJson }, { name: 'READ ME.txt', content: readMe }]));
   } catch (e) {
     console.error('[job ' + job.id + '] save failed: ' + String(e && e.message || e).split('\n')[0]);
-    throw new CaptureError('The library was not saved: ' + github.saveError(e, repo));
+    throw new CaptureError('The library could not be saved. Run the agent again.');
   }
   job.status = 'done';
+  job.share = share;
+  job.expires = Date.now() + RETENTION_MS;
+  shares.set(share, job.id);
   job.library = {
-    library_url: github.treeUrl(repo, branch, folder),
-    library_json_url: github.rawUrl(repo, branch, inFolder('library.json')),
-    commit, written: rows.length, total_in_library: images.length, descriptions_missing: missing,
+    library_url: base + 'library.json',
+    download_url: base + 'screenshots.zip',
+    expires: new Date(job.expires).toISOString(),
+    written: rows.length, descriptions_missing: missing,
   };
-  job.library_rows = rows;
-  console.log('[job ' + job.id + '] saved ' + rows.length + ' image(s) to ' + repo + '@' + branch + ' (' + commit.slice(0, 7) + ')');
+  job.library_rows = rows.map((r) => ({ ...r, url: base + r.url }));
+  console.log('[job ' + job.id + '] library ready: ' + rows.length + ' image(s), kept ' + RETENTION_HOURS + ' hours');
   const md = [
-    '**Library:** ' + job.library.library_url,
+    '**Library link:** ' + job.library.library_url,
     '',
-    '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') +
-      (images.length > rows.length ? ' (' + images.length + ' in the library in total)' : '') +
-      ', each ' + job.size.width + ' × ' + job.size.height,
+    '**Download all screenshots:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + ')',
+    '',
+    '**These links work until ' + whenUtc(job.expires) + '.** Make the storyboard and the slide deck before then. To keep the screenshots, download them: the READ ME inside says how to put them in your own folder.',
+    '',
+    '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', each ' + job.size.width + ' × ' + job.size.height,
     '',
     '| Screen | Description |',
     '|---|---|',
   ];
-  rows.forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
+  job.library_rows.forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
   md.push('');
   if (missing) md.push('_' + missing + ' description' + (missing === 1 ? ' was' : 's were') + ' not written, so ' + (missing === 1 ? 'it uses' : 'they use') + ' the screen name._', '');
   const rep = reportMd(job);
   if (rep) md.push(rep);
   job.library.summary_md = md.join('\n');
-  // The library is saved: this service keeps none of its images.
-  fs.rmSync(path.join(WORK_DIR, job.id), { recursive: true, force: true });
-  send(res, 200, { ...job.library, images: rows, not_captured: job.not_captured.map((n) => ({ target: n.target, reason: n.reason })) });
+  send(res, 200, { ...job.library, images: job.library_rows, not_captured: job.not_captured.map((n) => ({ target: n.target, reason: n.reason })) });
+}
+
+/** "28 Oct 2026, 14:05 UTC" */
+function whenUtc(ms) {
+  const d = new Date(ms);
+  const mon = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'][d.getUTCMonth()];
+  return d.getUTCDate() + ' ' + mon + ' ' + d.getUTCFullYear() + ', ' + String(d.getUTCHours()).padStart(2, '0') + ':' + String(d.getUTCMinutes()).padStart(2, '0') + ' UTC';
+}
+
+const asciiName = (s) => String(s || '').replace(/[^\x20-\x7E]/g, '').replace(/[\/\\:*?"<>|]/g, '').replace(/\s+/g, ' ').trim() || 'Screenshots';
+
+/** GET /library/<token>/<path>: a library's files, until it expires. Only the files listed here are served. */
+function serveLibrary(req, res, token, rel) {
+  const id = shares.get(token);
+  const job = id && jobs.get(id);
+  if (!job || job.status !== 'done' || !job.expires || Date.now() > job.expires) {
+    return send(res, 404, { error: 'This link has expired. Screenshot libraries are kept for ' + RETENTION_HOURS + ' hours. Run the Screenshot Library Builder again for new links.' });
+  }
+  const dir = path.join(WORK_DIR, job.id);
+  let file, type, extra = {};
+  if (rel === 'library.json') { file = path.join(dir, 'library.json'); type = 'application/json; charset=utf-8'; extra = { 'Access-Control-Allow-Origin': '*' }; }
+  else if (rel === 'screenshots.zip') {
+    file = path.join(dir, 'screenshots.zip'); type = 'application/zip';
+    extra = { 'Content-Disposition': 'attachment; filename="' + asciiName(job.product + ' Screenshots') + '.zip"' };
+  } else {
+    const s = job.screens.find((x) => x.folder + '/' + x.filename === rel);
+    if (s) { file = path.join(dir, s.folder, s.filename); type = 'image/png'; }
+  }
+  if (!file || !fs.existsSync(file)) return send(res, 404, { error: 'Not found' });
+  const buf = fs.readFileSync(file);
+  res.writeHead(200, { 'Content-Type': type, 'Content-Length': buf.length, 'Cache-Control': 'public, max-age=3600', ...SECURITY_HEADERS, ...extra });
+  return res.end(req.method === 'HEAD' ? undefined : buf);
 }
 
 const server = http.createServer(async (req, res) => {
@@ -521,7 +533,14 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && p === '/health') {
       return send(res, 200, { status: 'ok', service: 'AaGeJa Capture Service', version: VERSION,
-        running: !!running, queued: queue.length, key_set: !!CAPTURE_KEY, github: !!process.env.GITHUB_TOKEN });
+        running: !!running, queued: queue.length, key_set: !!CAPTURE_KEY, library_hours: RETENTION_HOURS });
+    }
+
+    const lib = p.match(/^\/library\/([a-f0-9]{32})\/(.+)$/);
+    if (lib && (req.method === 'GET' || req.method === 'HEAD')) {
+      let rel;
+      try { rel = decodeURIComponent(lib[2]); } catch (_) { return send(res, 404, { error: 'Not found' }); }
+      return serveLibrary(req, res, lib[1], rel);
     }
 
     if (p.startsWith('/capture/')) {
