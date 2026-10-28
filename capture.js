@@ -575,6 +575,9 @@ async function runCapture(job, creds, outDir) {
       });
       await note('opened environment');
       if (hasCreds) await signInUnguarded();
+      else if (await onSignInPage(page)) {
+        throw new CaptureError('The address opened a sign-in page. Enter the username and password for the environment.');
+      }
     } catch (e) {
       await note('sign-in failed');
       job.debug_image = await debugShot();

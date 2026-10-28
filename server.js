@@ -1,6 +1,18 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.3.0 (October 2026)
+ * AaGeJa Capture Service — v1.4.0 (October 2026)
+ *
+ * v1.4.0 — signing in is optional
+ *   - The username and password may both be left blank, for an address that
+ *     opens the product without signing in (for example a link that carries
+ *     its own access key). Then the service only opens the address. One
+ *     without the other is refused.
+ *   - With no username and password, an address that shows a sign-in page
+ *     stops the run with "The address opened a sign-in page. Enter the
+ *     username and password for the environment."
+ *   - The saved library still records page paths only: a key in the
+ *     address's query string is never written to library.json, the images'
+ *     metadata or the run report.
  *
  * v1.3.0 — the library is kept here for 24 hours, nowhere else
  *   - Every library is kept by this service for RETENTION_HOURS (24) on links
@@ -132,7 +144,7 @@ const { runCapture, parseTargets, parseSize, isPrivateIp, isInternalName, ALLOW_
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
@@ -362,7 +374,8 @@ async function start(req, res) {
   const username = String(body.username || '');
   const password = String(body.password || '');
   if (!product) throw new CaptureError('Product name is required');
-  if (!username.trim() || !password) throw new CaptureError('Enter the username and the password for the environment.');
+  // Both, or neither for an address that opens without signing in.
+  if (!!username.trim() !== !!password) throw new CaptureError('Enter both the username and the password, or leave both blank if the address opens the product without signing in.');
   const env = await checkEnvironment(body.environment_url);
   const mode = String(body.mode || 'guided').toLowerCase();
   if (mode !== 'guided') throw new CaptureError('This version captures a list of pages (Guided). Full crawl and Refresh are not available yet.');

@@ -29,7 +29,7 @@ Separate from content-api so a browser's memory use never touches content produc
 | Route | Key | What it does |
 |---|---|---|
 | `GET /health` | no | Status |
-| `POST /capture/start` | yes | `{ product, client, environment_url, username, password, targets, mask_words }` → `{ job_id, status_url }` |
+| `POST /capture/start` | yes | `{ product, client, environment_url, username, password, targets, mask_words }` → `{ job_id, status_url }`. Username and password: both, or neither for an address that opens without signing in. |
 | `GET /capture/status/:id` | yes | Progress, then `screens[]`, `ai_input` (page text for the description step), `report_md`, `not_captured[]` |
 | `GET /capture/image/:id/:folder/:file` | yes | A captured image, for preview |
 | `POST /capture/finalize/:id` | yes | Body: the description step's output as plain text, or `{ descriptions }` → `{ library_url, download_url, expires, summary_md, images[] }` |
@@ -39,7 +39,7 @@ Separate from content-api so a browser's memory use never touches content produc
 
 ## Rules the code enforces
 
-- **Credentials:** arrive with each run, are used in the browser only, and are never written, logged or returned. The agent tells the person running it that the password stays in MindStudio's run history and to change it after the capture.
+- **Credentials:** optional (an address that opens without signing in needs none). When given, they arrive with each run, are used in the browser only, and are never written, logged or returned. A key in the address's query string is never written to the library: it records page paths only. The agent tells the person running it that the password stays in MindStudio's run history and to change it after the capture.
 - **What it does on the site:**
   - It only opens pages and clicks menu items. Menu steps and web addresses containing words that change data (delete, save, submit, sign out and similar) are refused before anything is clicked.
   - After sign-in, the browser refuses DELETE, PUT and PATCH requests, and form posts that load a new page when the service did not start them.
