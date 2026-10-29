@@ -688,11 +688,12 @@ async function finalize(req, res, job) {
   const w = job.walk;
   const errorPages = w ? Object.keys(w.errors || {}).length : 0;
   const md = [
-    '**Download your screenshots:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + ')',
+    '**Download your screenshots:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + ')' +
+      (earlier ? ': all ' + rows.length + ', from this run and the earlier run' + (job.runs > 2 ? 's' : '') + '. Keep only this download: it replaces the earlier one.' : ''),
     '',
     'To use them in storyboards and lab guides, unzip the download and upload everything, keeping its folders, to a folder anyone can open by link: a public GitHub repository, or a public Amazon S3 or Google Cloud Storage bucket (not Google Drive, SharePoint or OneDrive: their links do not open the images). Then paste that folder\'s link (on GitHub) or the link to library.json in it (anywhere else) into the **Screenshot Library URL** field of the **Storyboard and Lab Guide Developer**, for every storyboard and lab guide that needs these screenshots. The READ ME in the download says the same.',
     '',
-    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): every screenshot with its name and description, then how the capture went. It is also in the download.', ''] : []),
+    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): ' + (earlier ? 'all ' + rows.length + ' screenshots, from every run,' : 'every screenshot') + ' with its name and description, then how the capture went. It is also in the download.', ''] : []),
     '**These download links work until ' + whenUtc(job.expires) + '.** Download the files before then.',
     '',
     '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', each ' + job.size.width + ' × ' + job.size.height +
