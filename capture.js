@@ -39,7 +39,8 @@ const USER_SEL = [
 ].join(', ');
 const MAX_TARGETS = 50;
 // The walk: screenshots per run, states tried, clicks from one page, and time.
-const MAX_SCREENS = 100;
+// CAPTURE_MAX_SCREENS: a test machine only, to try the limit and Continue with a few screens.
+const MAX_SCREENS = Number(process.env.CAPTURE_MAX_SCREENS) || 100;
 const MAX_STATES = 600;
 const MAX_CLICKS = 4;
 const WALK_MS = 45 * 60 * 1000;
@@ -521,7 +522,8 @@ async function runCapture(job, creds, outDir) {
   const words = job.mask_words || [];
   const envUrl = new URL(job.environment_url);
   const allowedHosts = new Set([envUrl.host]);
-  const used = new Set();
+  // A run that continues an earlier walk (job.resume) keeps its file names and sites.
+  const used = new Set(job.resume ? job.resume.used : []);
   const level = LEVELS.includes(job.click_level) ? job.click_level : 'links';
   const t0 = Date.now();
   const masker = (s) => maskString(s, words);
@@ -641,6 +643,7 @@ async function runCapture(job, creds, outDir) {
     }
     const home = page.url();
     allowedHosts.add(new URL(home).host);
+    if (job.resume) for (const h of job.resume.hosts || []) allowedHosts.add(h);
     await note('signed in');
     state.guard = true;
 
@@ -687,6 +690,12 @@ async function runCapture(job, creds, outDir) {
       used.add(folder + '/' + filename);
       fs.mkdirSync(path.join(outDir, folder), { recursive: true });
       fs.writeFileSync(path.join(outDir, folder, filename), buf);
+      // A smaller copy for the PDF catalogue only; never in the zip or served.
+      try {
+        const jpg = await page.screenshot({ type: 'jpeg', quality: 75, fullPage: false, animations: 'disabled', caret: 'hide' });
+        fs.mkdirSync(path.join(outDir, '_thumbs', folder), { recursive: true });
+        fs.writeFileSync(path.join(outDir, '_thumbs', folder, filename.replace(/\.png$/, '.jpg')), jpg);
+      } catch (_) {}
       job.screens.push({
         folder, filename, module: moduleName, screen: screenName, target,
         page_title: facts.title, heading: facts.h1, headings: facts.headings, labels: facts.labels,
@@ -754,11 +763,12 @@ async function runCapture(job, creds, outDir) {
     // With no pages listed, it walks the product from the page after sign-in.
     // With pages listed and the buttons or all level, it opens what is on
     // each listed page (buttons, tabs, dialogs) but follows no links.
-    if (!job.targets.length || level !== 'links') {
+    if (!job.targets.length || level !== 'links' || job.resume) {
       job.stage = 'capturing';
       const followLinks = !job.targets.length;
       const seeds = [];
-      if (followLinks) seeds.push({ base: home, actions: [], trail: [], parent: null, phase: 1, capture: true, home: true });
+      if (job.resume) { /* the earlier run's list of screens still to open */ }
+      else if (followLinks) seeds.push({ base: home, actions: [], trail: [], parent: null, phase: 1, capture: true, home: true });
       else {
         for (const t of job.targets) {
           const shot = job.screens.find((s) => s.target === t.raw);
@@ -790,13 +800,17 @@ async function runCapture(job, creds, outDir) {
       const w = job.walk;
       // Each name once: the same Sign out on every page is one entry.
       const tally = (bucket, label) => { const k = masker(label || '(no name)').slice(0, 60); bucket[k] = 1; };
-      const seenFp = new Set();
-      const seenPat = new Set();
-      const keys = new Set();
-      const downloads = new Set();
+      // Continuing an earlier walk: what it saw is seen, what it left is the queue.
+      const R = job.resume || {};
+      const seenFp = new Set(R.seenFp || []);
+      const seenPat = new Set(R.seenPat || []);
+      const keys = new Set(R.keys || []);
+      const downloads = new Set(R.downloads || []);
       const q1 = [];
       const q2 = [];
       for (const s of seeds) q1.push(s);
+      for (const s of R.q1 || []) q1.push(s);
+      for (const s of R.q2 || []) q2.push(s);
       const pending = () => q1.length + q2.length;
       const progress = () => {
         job.progress.done = job.screens.length;
@@ -964,8 +978,8 @@ async function runCapture(job, creds, outDir) {
           if (st.home) { moduleName = 'Home'; screenName = 'Home'; }
           else if (navigated && !s.dialog) {
             moduleName = facts.active_nav || masker((st.names || st.trail)[0] || '') || urlPath[0] || 'general';
-            screenName = pat.hasId ? parentScreen + ' detail'
-              : (facts.h1 || titleName(facts.title) || masker(st.trail[st.trail.length - 1] || '') || 'page');
+            // Every page is named by its own heading, as the page list names one.
+            screenName = facts.h1 || titleName(facts.title) || masker(st.trail[st.trail.length - 1] || '') || 'page';
           } else if (s.dialog) {
             const d = masker(s.dialog);
             screenName = d && d !== 'dialog' ? d : parentScreen + ' ' + masker(last ? last.label : '');
@@ -1064,6 +1078,11 @@ async function runCapture(job, creds, outDir) {
       }
       w.left = pending();
       w.downloads = downloads.size;
+      // What a later run needs to carry on from here, kept with the job for its 24 hours.
+      job.walkState = pending() ? {
+        level, q1, q2, seenFp: [...seenFp], seenPat: [...seenPat], keys: [...keys], downloads: [...downloads],
+        used: [...used], hosts: [...allowedHosts],
+      } : null;
       progress();
       job.progress.current = '';
     }

@@ -15,12 +15,14 @@ Separate from content-api so a browser's memory use never touches content produc
 - **Pages listed** with `buttons` or `all`: it opens what is on each listed page (buttons, tabs, dialogs) and follows no links.
 - The controls on each screen come from `discover_controls.js`, the platform-module-capture skill's script, with the additions marked in it. What may be clicked, and how screens are told apart, is in `walk.js`.
 - The run report says what it clicked, why it stopped, what it found but did not open, and what it did not click and why.
+- **Continue (1.6.0):** a walk stops at 100 screenshots (or 45 minutes). `continue_from` = the earlier run's library link: the next run signs in again, carries on with the screens the earlier run found but did not open, skips what it captured, and saves one library holding both runs. Within the earlier library's 24 hours; same environment; Pages blank; the first run's clicking choice is used. `CAPTURE_MAX_SCREENS` lowers the limit on a test machine only.
 
 ## The library
 
 - Every library is kept by this service for 24 hours (`RETENTION_HOURS`), then deleted. The links carry a 128-bit random token and stop working when the time is up.
-- **Library link:** `…/library/<token>/library.json`. Paste it into the Storyboard Designer's Screenshot Library URL field within the 24 hours. The Storyboard Designer reads each screen's description from it.
-- **Download:** `…/library/<token>/screenshots.zip`: the images in their folders, `library.json` and a `READ ME.txt`.
+- **Link for the Storyboard Designer:** `…/library/<token>/library.json`. Paste it into the Storyboard Designer's Screenshot Library URL field within the 24 hours. The Storyboard Designer reads each screen's description from it.
+- **Download:** `…/library/<token>/screenshots.zip`: the images in their folders, `library.json`, `screenshot-catalogue.pdf` and a `READ ME.txt`.
+- **Catalogue (1.6.0):** `…/library/<token>/screenshots.pdf`: every screenshot with its name and description, then how the capture went. Made from a smaller JPEG copy of each screenshot.
 - **To keep the screenshots,** the customer unzips the download and uploads it to a folder anyone can open by link: a public GitHub repository, a public Amazon S3 or Google Cloud Storage bucket, or a public web folder. In `library.json` each image's link is relative to the file (`home/x.png`), so it still works there. Then they paste that folder's link (GitHub) or the link to its `library.json` (anywhere else) into the Storyboard Designer.
 - Google Drive, SharePoint and OneDrive cannot be used: storyboards and slide decks cannot open images from them by link.
 - No account or key of AaGeJa's touches a customer's storage. (Saving straight to GitHub, S3 or Google Cloud Storage was built and is kept on the `capture-storage-options` branch, not deployed.)
@@ -41,11 +43,11 @@ Separate from content-api so a browser's memory use never touches content produc
 | Route | Key | What it does |
 |---|---|---|
 | `GET /health` | no | Status |
-| `POST /capture/start` | yes | `{ product, client, environment_url, username, password, targets, click_level, mask_words }` → `{ job_id, status_url }`. Username and password: both, or neither for an address that opens without signing in. `targets` blank: walk the product. `click_level`: `links` (default), `buttons` or `all`. |
+| `POST /capture/start` | yes | `{ product, client, environment_url, username, password, targets, click_level, continue_from, mask_words }` → `{ job_id, status_url }`. Username and password: both, or neither for an address that opens without signing in. `targets` blank: walk the product. `click_level`: `links` (default), `buttons` or `all`. |
 | `GET /capture/status/:id` | yes | Progress, then `screens[]`, `ai_input` (page text for the description step), `report_md`, `not_captured[]` |
 | `GET /capture/image/:id/:folder/:file` | yes | A captured image, for preview |
 | `POST /capture/finalize/:id` | yes | Body: the description step's output as plain text, or `{ descriptions }` → `{ library_url, download_url, expires, summary_md, images[] }` |
-| `GET /library/:token/library.json`, `/screenshots.zip`, `/<folder>/<file>.png` | no | The library, until it expires. Nothing else is served. |
+| `GET /library/:token/library.json`, `/screenshots.zip`, `/screenshots.pdf`, `/<folder>/<file>.png` | no | The library, until it expires. Nothing else is served. |
 
 - `targets` is one page per line: a full web address, a path starting with `/`, or a menu path such as `Admin > Users`. Blank: the walk.
 

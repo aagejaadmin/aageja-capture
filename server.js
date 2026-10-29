@@ -1,6 +1,26 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.5.0 (October 2026)
+ * AaGeJa Capture Service — v1.6.0 (October 2026)
+ *
+ * v1.6.0 — continue a walk, a PDF catalogue, plainer links
+ *   - continue_from (new): the link of an earlier run's library, from a walk
+ *     that stopped at its limit. The run signs in again (the sign-in is never
+ *     kept), carries on with the screens the earlier run found but did not
+ *     open, skips everything it already captured, and saves one library with
+ *     the earlier run's screenshots and its own. Refused when pages are
+ *     listed, when the link is for another environment, when it has expired,
+ *     or when the earlier run left nothing to open. The clicking choice of the
+ *     first run is used.
+ *   - The screenshot catalogue: screenshots.pdf, every screenshot with its
+ *     name and description, then how the capture went. On its own link and
+ *     in the zip. Made from a smaller JPEG copy of each screenshot taken at
+ *     capture, so it stays small enough to share.
+ *   - The summary names the library link for what it is: the link for the
+ *     Storyboard Designer's Screenshot Library URL field. When screens were
+ *     left, it says how many and how to capture the next ones.
+ *   - Fixed: in a walk, pages whose address carries a number (almost every
+ *     page on some products) were named "<previous screen> detail". Every page
+ *     is now named by its own heading.
  *
  * v1.5.0 — the walk: clicks through the product
  *   - targets may be blank: the service then walks the product from the page
@@ -163,11 +183,12 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const dns = require('node:dns').promises;
-const { runCapture, parseTargets, parseSize, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError, LEVELS } = require('./capture');
+const { runCapture, parseTargets, parseSize, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError, LEVELS, MAX_SCREENS } = require('./capture');
+const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.5.0';
+const VERSION = '1.6.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
@@ -291,10 +312,11 @@ function walkMd(job) {
   if (!w) return '';
   const n = job.screens.length;
   const out = ['**How the capture went through the product**', ''];
-  out.push((w.mode === 'walk' ? 'Starting from the page after sign-in, it ' : 'On each page you listed, it ') + LEVEL_WORDS[w.level] +
-    '. ' + n + ' screenshot' + (n === 1 ? '' : 's') + ' taken.');
-  const left = w.left ? ' ' + w.left + ' more screen' + (w.left === 1 ? ' it found was' : 's it found were') + ' not opened. To capture them, run again with those pages listed.' : '';
-  if (w.stopped === 'limit') out.push('', 'It stopped at the limit of 100 screenshots.' + left);
+  out.push((job.resume ? 'Carrying on from the earlier run, with its clicking choice, it ' : w.mode === 'walk' ? 'Starting from the page after sign-in, it ' : 'On each page you listed, it ') + LEVEL_WORDS[w.level] +
+    '. ' + n + ' screenshot' + (n === 1 ? '' : 's') + ' taken' + (job.resume ? ' in this run' : '') + '.');
+  const left = w.left ? ' ' + w.left + ' more screen' + (w.left === 1 ? ' it found was' : 's it found were') + ' not opened.' +
+    (w.mode === 'walk' ? ' To capture them, run again with this library\'s link in Continue From.' : '') : '';
+  if (w.stopped === 'limit') out.push('', 'It stopped at the limit of ' + MAX_SCREENS + ' screenshots a run.' + left);
   else if (w.stopped === 'time') out.push('', 'It stopped after 45 minutes.' + left);
   else if (w.stopped === 'tries') out.push('', 'It stopped after trying 600 screens.' + left);
   else if (w.stopped === 'session') out.push('', 'It stopped because the site kept showing its sign-in page.');
@@ -466,6 +488,19 @@ async function start(req, res) {
 
   // No pages listed: the service walks the product.
   const targets = parseTargets(body.targets, env.href);
+
+  // Continue an earlier walk: its library link (or token) from the Library Ready screen.
+  let earlier = null;
+  const cont = String(body.continue_from || '').trim();
+  if (cont) {
+    const t = (cont.match(/\/library\/([a-f0-9]{32})(?:\/|$)/) || cont.match(/^([a-f0-9]{32})$/) || [])[1];
+    const j = t && shares.has(t) ? jobs.get(shares.get(t)) : null;
+    if (!j || j.status !== 'done' || !j.expires || Date.now() > j.expires) throw new CaptureError('The Continue From link has expired or is not a Screenshot Library Builder link. Leave Continue From blank to start a new capture.');
+    if (targets.length) throw new CaptureError('Leave Pages blank to continue an earlier run.');
+    if (new URL(j.environment_url).host !== env.host) throw new CaptureError('The Continue From link is for a different environment address. Use the same address as the earlier run.');
+    if (!j.walkState) throw new CaptureError('The earlier run captured every screen it found, so there is nothing to continue.');
+    earlier = j;
+  }
   const size = parseSize(body.image_size);
   const maskWords = (Array.isArray(body.mask_words) ? body.mask_words : String(body.mask_words || '').split(/[\n,]/))
     .map((s) => String(s).trim()).filter((s) => s.length >= 2).slice(0, 50);
@@ -473,12 +508,31 @@ async function start(req, res) {
   const id = crypto.randomBytes(12).toString('hex');
   const job = {
     id, status: 'queued', stage: '', created: Date.now(),
-    product, client, environment_url: env.href, size, mask_words: maskWords, targets, click_level: clickLevel,
+    product: earlier ? earlier.product : product, client: earlier ? earlier.client : client,
+    environment_url: env.href, size: earlier ? earlier.size : size, mask_words: maskWords, targets,
+    click_level: earlier ? earlier.walkState.level : clickLevel,
     progress: { done: 0, total: targets.length || 1, current: '' },
     screens: [], not_captured: [], masked: 0, blocked_requests: 0, blocked: [], trace: [], debug_image: '',
     background_requests: 0, background: [],
     _creds: { username, password },
   };
+  if (earlier) {
+    // This run's library starts as a copy of the earlier one, so it does not
+    // depend on the earlier run's links staying up.
+    job.resume = JSON.parse(JSON.stringify(earlier.walkState));
+    job.prior = { rows: earlier.rows.map((r) => ({ ...r })), not_captured: (earlier.library_not_captured || []).slice() };
+    job.runs = (earlier.runs || 1) + 1;
+    const from = path.join(WORK_DIR, earlier.id);
+    const to = path.join(WORK_DIR, id);
+    for (const r of earlier.rows) {
+      for (const [a, b] of [[path.join(from, r.folder, r.filename), path.join(to, r.folder, r.filename)],
+        [path.join(from, '_thumbs', r.folder, r.filename.replace(/\.png$/, '.jpg')), path.join(to, '_thumbs', r.folder, r.filename.replace(/\.png$/, '.jpg'))]]) {
+        if (!fs.existsSync(a)) continue;
+        fs.mkdirSync(path.dirname(b), { recursive: true });
+        fs.copyFileSync(a, b);
+      }
+    }
+  }
   jobs.set(id, job);
   queue.push(job);
   setImmediate(pump);
@@ -487,6 +541,7 @@ async function start(req, res) {
     status: job.status,
     queue_position: queue.indexOf(job) + 1,
     targets: targets.length,
+    continues: earlier ? earlier.rows.length : 0,
     status_url: baseUrl(req) + '/capture/status/' + id,
   });
 }
@@ -514,6 +569,17 @@ async function finalize(req, res, job) {
   const files = [];
   const rows = [];
   let missing = 0;
+  // A run that continued an earlier one starts from that run's library: its
+  // screenshots were copied here when this run started.
+  const prior = job.prior || { rows: [], not_captured: [] };
+  for (const r of prior.rows) {
+    const rel = r.folder + '/' + r.filename;
+    const f = path.join(dir, r.folder, r.filename);
+    if (!fs.existsSync(f)) continue;
+    files.push({ name: rel, content: fs.readFileSync(f) });
+    rows.push(r);
+  }
+  const earlier = rows.length;
   for (const s of job.screens) {
     const d = byName.get(s.filename) || {};
     if (!d.description) missing++;
@@ -535,26 +601,45 @@ async function finalize(req, res, job) {
       page_title: s.page_title, source_path: s.source_path, captured: date,
     });
   }
+  const notCaptured = prior.not_captured.concat(job.not_captured.map((n) => ({ target: n.target, reason: n.reason })));
   const library = {
     product: job.product, client: job.client,
     captured: date, image_size: job.size.width + 'x' + job.size.height, count: rows.length,
-    images: rows, not_captured: job.not_captured.map((n) => ({ target: n.target, reason: n.reason })),
+    images: rows, not_captured: notCaptured,
   };
   const libraryJson = Buffer.from(JSON.stringify(library, null, 2) + '\n', 'utf8');
+  const remaining = job.walkState ? job.walk.left : 0;
   const readMe = Buffer.from([
     'Screenshot library: ' + job.product + (job.client ? ' (' + job.client + ')' : '') + ', ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', captured ' + date + '.',
     '',
+    'screenshot-catalogue.pdf shows every screenshot with its name and description, for reviewing and sharing.',
+    '',
     'To keep these screenshots and use them in storyboards:',
     '',
-    '1. Unzip this file. Keep the folders as they are. library.json lists every screenshot with its description.',
+    '1. Unzip this file. Keep the folders as they are. library.json lists every screenshot with its description; the Storyboard Designer reads it.',
     '2. Upload everything to a folder anyone can open by link: a public GitHub repository, a public Amazon S3 or Google Cloud Storage bucket, or a public web folder. Google Drive, SharePoint and OneDrive cannot be used: storyboards and slide decks cannot open images from them by link.',
     '3. In the Storyboard Designer, paste the link into the Screenshot Library URL field: for GitHub, the link to the folder; for anywhere else, the link to library.json in it.',
     '',
   ].join('\r\n'), 'utf8');
+  let pdf = null;
   try {
     for (const f of files) fs.writeFileSync(path.join(dir, ...f.name.split('/')), f.content);
     fs.writeFileSync(path.join(dir, 'library.json'), libraryJson);
-    fs.writeFileSync(path.join(dir, 'screenshots.zip'), zip.build([...files, { name: 'library.json', content: libraryJson }, { name: 'READ ME.txt', content: readMe }]));
+    // The catalogue: made here, kept if it fails (the library is saved without it).
+    try {
+      const out = path.join(dir, 'screenshots.pdf');
+      await buildCatalogue({
+        dir, rows, product: job.product, client: job.client, captured: date,
+        size: job.size.width + ' × ' + job.size.height, reportMd: reportMd(job), outFile: out,
+      });
+      pdf = fs.readFileSync(out);
+    } catch (e) {
+      console.error('[job ' + job.id + '] catalogue not made: ' + String(e && e.message || e).split('\n')[0]);
+    }
+    fs.writeFileSync(path.join(dir, 'screenshots.zip'), zip.build([
+      ...files, { name: 'library.json', content: libraryJson }, { name: 'READ ME.txt', content: readMe },
+      ...(pdf ? [{ name: 'screenshot-catalogue.pdf', content: pdf }] : []),
+    ]));
   } catch (e) {
     console.error('[job ' + job.id + '] save failed: ' + String(e && e.message || e).split('\n')[0]);
     throw new CaptureError('The library could not be saved. Run the agent again.');
@@ -562,34 +647,46 @@ async function finalize(req, res, job) {
   job.status = 'done';
   job.share = share;
   job.expires = Date.now() + RETENTION_MS;
+  job.rows = rows;
+  job.library_not_captured = notCaptured;
   shares.set(share, job.id);
   job.library = {
     library_url: base + 'library.json',
     download_url: base + 'screenshots.zip',
+    pdf_url: pdf ? base + 'screenshots.pdf' : null,
     expires: new Date(job.expires).toISOString(),
-    written: rows.length, descriptions_missing: missing,
+    written: rows.length, new_screens: rows.length - earlier, earlier_screens: earlier,
+    descriptions_missing: missing, screens_left: remaining,
   };
   job.library_rows = rows.map((r) => ({ ...r, url: base + r.url }));
-  console.log('[job ' + job.id + '] library ready: ' + rows.length + ' image(s), kept ' + RETENTION_HOURS + ' hours');
+  console.log('[job ' + job.id + '] library ready: ' + rows.length + ' image(s)' + (earlier ? ' (' + earlier + ' from earlier runs)' : '') + (pdf ? ', catalogue' : '') + ', kept ' + RETENTION_HOURS + ' hours');
+  const n = rows.length - earlier;
   const md = [
-    '**Library link:** ' + job.library.library_url,
+    '**Link for the Storyboard Designer:** ' + job.library.library_url,
     '',
+    'Paste this link into the Storyboard Designer\'s **Screenshot Library URL** field. It finds every screenshot and its description from it.',
+    '',
+    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): every screenshot with its name and description, to review or share.', ''] : []),
     '**Download all screenshots:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + ')',
     '',
-    '**These links work until ' + whenUtc(job.expires) + '.** Make the storyboard and the slide deck before then. To keep the screenshots, download them: the READ ME inside says how to put them in your own folder.',
+    '**These links work until ' + whenUtc(job.expires) + '.** Make the storyboard and the slide deck before then. To keep the screenshots, download the zip: the READ ME inside says how to put them in your own folder.',
     '',
-    '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', each ' + job.size.width + ' × ' + job.size.height,
+    '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', each ' + job.size.width + ' × ' + job.size.height +
+      (earlier ? ': ' + n + ' new in this run, and ' + earlier + ' from the earlier run' + (job.runs > 2 ? 's' : '') + '. This link has all of them.' : ''),
     '',
-    '| Screen | Description |',
-    '|---|---|',
   ];
-  job.library_rows.forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
+  if (remaining) {
+    md.push('**' + remaining + ' more screen' + (remaining === 1 ? ' was' : 's were') + ' found but not captured yet.** To capture the next ' + Math.min(remaining, MAX_SCREENS) +
+      ', run the agent again within 24 hours with the same environment address and sign-in, leave Pages blank, and paste the link for the Storyboard Designer above into **Continue From**. The next run adds its screenshots to these, and its link will have all of them.', '');
+  }
+  md.push(earlier ? '**New in this run**' : '**Screenshots**', '', '| Screen | Description |', '|---|---|');
+  job.library_rows.slice(earlier).forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
   md.push('');
   if (missing) md.push('_' + missing + ' description' + (missing === 1 ? ' was' : 's were') + ' not written, so ' + (missing === 1 ? 'it uses' : 'they use') + ' the screen name._', '');
   const rep = reportMd(job);
   if (rep) md.push(rep);
   job.library.summary_md = md.join('\n');
-  send(res, 200, { ...job.library, images: job.library_rows, not_captured: job.not_captured.map((n) => ({ target: n.target, reason: n.reason })) });
+  send(res, 200, { ...job.library, images: job.library_rows, not_captured: notCaptured });
 }
 
 /** "28 Oct 2026, 14:05 UTC" */
@@ -614,8 +711,12 @@ function serveLibrary(req, res, token, rel) {
   else if (rel === 'screenshots.zip') {
     file = path.join(dir, 'screenshots.zip'); type = 'application/zip';
     extra = { 'Content-Disposition': 'attachment; filename="' + asciiName(job.product + ' Screenshots') + '.zip"' };
+  } else if (rel === 'screenshots.pdf') {
+    file = path.join(dir, 'screenshots.pdf'); type = 'application/pdf';
+    extra = { 'Content-Disposition': 'inline; filename="' + asciiName(job.product + ' Screenshots') + '.pdf"' };
   } else {
-    const s = job.screens.find((x) => x.folder + '/' + x.filename === rel);
+    // Only the images the library lists, this run's and any earlier run's.
+    const s = (job.rows || job.screens).find((x) => x.folder + '/' + x.filename === rel);
     if (s) { file = path.join(dir, s.folder, s.filename); type = 'image/png'; }
   }
   if (!file || !fs.existsSync(file)) return send(res, 404, { error: 'Not found' });
