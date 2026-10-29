@@ -1,18 +1,22 @@
 'use strict';
 /**
- * Browser side of a capture job: sign in, visit each target, clean the page,
- * mask personal details, read what is on screen, take the screenshot.
+ * Browser side of a capture job: sign in, visit each target or walk the
+ * product, clean the page, mask personal details, read what is on screen,
+ * take the screenshot.
  *
  * What the service does on the site, and what it does not:
  *   - The only typing is the username and password at sign-in.
- *   - It only opens pages and clicks menu items. Menu steps and addresses
- *     whose words could change data are refused before anything is clicked
- *     or opened (DANGER below).
- *   - After sign-in, the browser refuses DELETE, PUT and PATCH requests, and
- *     form posts that load a new page when the service did not start them.
- *   - Pages still make their own background requests while they load, as
- *     they do for any person viewing them. Every one that is not a plain read
- *     (GET) is recorded and listed in the run report.
+ *   - What it clicks depends on the level the person chose (walk.js):
+ *     links (menus, tabs and links), buttons (also buttons, dialogs and
+ *     forms, left without saving) or all (also buttons that change data).
+ *     At every level it never signs out, pays, or acts as another user.
+ *   - Below the "all" level, menu steps, links and buttons whose words could
+ *     change data are refused before anything is clicked or opened, and after
+ *     sign-in the browser refuses DELETE, PUT and PATCH requests, and form
+ *     posts that load a new page when the service did not start them.
+ *   - Pages still make their own background requests, as they do for any
+ *     person viewing them. Every one that is not a plain read (GET) is
+ *     recorded and listed in the run report.
  *   - New windows a click opens are closed, not followed.
  *   - Requests to addresses that are not on the public internet (this
  *     machine, private networks, cloud-internal names) are refused.
@@ -21,7 +25,9 @@
 const { chromium } = require('playwright');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const png = require('./png-meta');
+const W = require('./walk');
 
 const DANGER = /\b(delete|remove|deactivate|disable|archive|purge|reset|revoke|terminate|sign\s?out|sign\s?off|log\s?out|log\s?off|logout|logoff|signout|save|submit|approve|reject|decline|send|publish|unpublish|pay|purchase|buy|checkout|import|upload|assign|unassign|enrol+|register|request|launch|confirm)\b/i;
 const PASS_SEL = 'input[type="password"]';
@@ -31,9 +37,31 @@ const USER_SEL = [
   'input[name*="email" i]', 'input[id*="email" i]', 'input[type="text"]', 'input:not([type])',
 ].join(', ');
 const MAX_TARGETS = 50;
+// The walk: screenshots per run, states tried, clicks from one page, and time.
+const MAX_SCREENS = 100;
+const MAX_STATES = 600;
+const MAX_CLICKS = 4;
+const WALK_MS = 45 * 60 * 1000;
+const LEVELS = ['links', 'buttons', 'all'];
 
 class CaptureError extends Error {
   constructor(message) { super(message); this.userMessage = message; }
+}
+
+/** A screen the walk did not open, and why: window, site, gone, signin, changed. */
+class Skip extends Error {
+  constructor(why, label) { super(why); this.why = why; this.label = label || ''; }
+}
+
+/** The same masking as on screen, for names the run report repeats. */
+function maskString(s, words) {
+  let t = String(s || '').replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, 'user@example.com');
+  t = t.replace(/(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)|\d{2,4})[\s.-]\d{3,4}[\s.-]\d{3,4}\b/g, (m) => {
+    const d = m.replace(/\D/g, '').length;
+    return d < 10 || d > 15 ? m : '(555) 555-0100';
+  });
+  for (const w of words || []) if (w) t = t.replace(new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), (m) => '•'.repeat(Math.min(m.length, 12)));
+  return t;
 }
 
 // ── Inputs ─────────────────────────────────────────────────────────────────
@@ -54,7 +82,8 @@ function parseSize(s) {
  */
 function parseTargets(text, environmentUrl) {
   const lines = String(text || '').split(/\r?\n/).map((s) => s.trim()).filter((s) => s && !s.startsWith('#'));
-  if (!lines.length) throw new CaptureError('List at least one page to capture');
+  // No pages listed: the walk captures the product from the page after sign-in.
+  if (!lines.length) return [];
   if (lines.length > MAX_TARGETS) throw new CaptureError('List at most ' + MAX_TARGETS + ' pages in one run');
   return lines.map((raw) => {
     if (/^https?:\/\//i.test(raw)) return { raw, url: raw };
@@ -357,11 +386,17 @@ function maskInPage(words) {
     for (const el of root.querySelectorAll('*')) if (el.shadowRoot) walk(el.shadowRoot);
   };
   if (document.body) walk(document.body);
+  // The page title is saved with the screenshot, so it is masked too.
+  if (document.title) { const v = maskText(document.title); if (v !== document.title) document.title = v; }
   return count;
 }
 
-/** What is on screen: title, headings, labels and controls inside the viewport. */
-function factsInPage() {
+/**
+ * What is on screen: title, headings, labels and controls inside the
+ * viewport. With arg.dialog, only what is in the open dialog, so the
+ * description is of the dialog and not the page behind it.
+ */
+function factsInPage(arg) {
   const vis = (el) => {
     const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' &&
@@ -370,7 +405,10 @@ function factsInPage() {
   const txt = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.value || el.title || '')
     .replace(/\s+/g, ' ').trim().slice(0, 80);
   const uniq = (a) => [...new Set(a.filter(Boolean))];
-  const all = (sel) => [...document.querySelectorAll(sel)].filter(vis);
+  const DLG = '[role=dialog], [role=alertdialog], dialog[open], [aria-modal="true"], .modal.show, .modal.in, .ui-dialog, .k-window, .ReactModal__Content';
+  const top = arg && arg.dialog ? [...document.querySelectorAll(DLG)].filter(vis).pop() || null : null;
+  const root = top || document;
+  const all = (sel) => [...root.querySelectorAll(sel)].filter(vis);
   const kind = (el) => {
     const role = el.getAttribute('role');
     if (role) return role;
@@ -394,7 +432,7 @@ function factsInPage() {
   const controls = ctl.filter((el) => !inChrome(el)).map(label).concat(ctl.filter(inChrome).map(label));
   // Text in the page body inside the viewport, to tell a loaded page from an empty one.
   let bodyText = 0;
-  const tw = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+  const tw = document.createTreeWalker(top || document.body || document.documentElement, NodeFilter.SHOW_TEXT);
   while (tw.nextNode()) {
     const p = tw.currentNode.parentElement;
     if (!p || inChrome(p) || /^(SCRIPT|STYLE|NOSCRIPT)$/.test(p.tagName) || !vis(p)) continue;
@@ -403,7 +441,7 @@ function factsInPage() {
   }
   return {
     title: document.title || '',
-    h1: (all('h1, [role=heading][aria-level="1"]').map(txt).filter(Boolean)[0]) || '',
+    h1: (all(top ? 'h1, h2, h3, h4, [role=heading], .modal-title, .ui-dialog-title' : 'h1, [role=heading][aria-level="1"]').map(txt).filter(Boolean)[0]) || '',
     headings: uniq(all('h1, h2, h3, [role=heading]').map(txt)).slice(0, 12),
     labels: uniq(all('label, th, legend, dt').map(txt)).slice(0, 25),
     controls: uniq(controls).slice(0, 60),
@@ -418,10 +456,10 @@ async function maskPage(page, words) {
   return n;
 }
 
-async function pageFacts(page) {
+async function pageFacts(page, opts) {
   const merged = { title: '', h1: '', headings: [], labels: [], controls: [], active_nav: '', body_text: 0 };
   for (const f of page.frames()) {
-    const x = await f.evaluate(factsInPage).catch(() => null);
+    const x = await f.evaluate(factsInPage, opts || null).catch(() => null);
     if (!x) continue;
     if (f === page.mainFrame()) merged.title = x.title;
     merged.h1 = merged.h1 || x.h1;
@@ -483,10 +521,15 @@ async function runCapture(job, creds, outDir) {
   const envUrl = new URL(job.environment_url);
   const allowedHosts = new Set([envUrl.host]);
   const used = new Set();
+  const level = LEVELS.includes(job.click_level) ? job.click_level : 'links';
+  const t0 = Date.now();
+  const masker = (s) => maskString(s, words);
   let popup = false;
   // guard: on after the first sign-in. acting: true only while the service
-  // itself is signing in, opening a listed page or clicking a safe menu step.
-  const state = { guard: false, acting: false };
+  // itself is signing in, opening a page or clicking. acceptDialogs: true
+  // only while the "all" level presses a button that changes data, so the
+  // site's own "Are you sure?" box is answered yes.
+  const state = { guard: false, acting: false, acceptDialogs: false };
   let page = null;
   let debugN = 0;
 
@@ -530,7 +573,9 @@ async function runCapture(job, creds, outDir) {
     page = await context.newPage();
     page.setDefaultTimeout(15000);
     context.on('page', (p) => { if (p !== page) { popup = true; p.close().catch(() => {}); } });
-    page.on('dialog', (d) => d.dismiss().catch(() => {}));
+    // Leaving a page is always allowed; anything else the browser asks is
+    // answered no, except while the "all" level presses a data-changing button.
+    page.on('dialog', (d) => ((d.type() === 'beforeunload' || state.acceptDialogs) ? d.accept() : d.dismiss()).catch(() => {}));
 
     // Addresses that are not on the public internet are refused at all times.
     // After the first sign-in the browser also refuses DELETE, PUT and PATCH,
@@ -552,7 +597,9 @@ async function runCapture(job, creds, outDir) {
       }
       const write = m === 'DELETE' || m === 'PUT' || m === 'PATCH';
       const postNav = m === 'POST' && r.isNavigationRequest() && !state.acting;
-      if (state.guard && (write || postNav)) {
+      // The "all" level was chosen to change data: nothing is refused but
+      // addresses off the public internet.
+      if (state.guard && level !== 'all' && (write || postNav)) {
         job.blocked_requests++;
         if (job.blocked.length < 20) job.blocked.push(m + ' ' + cleanSourceUrl(r.url()));
         return route.abort('blockedbyclient');
@@ -617,6 +664,28 @@ async function runCapture(job, creds, outDir) {
       return keepOpen;
     };
 
+    /** Saves a screenshot of the page as it is now and records the screen. */
+    const shoot = async ({ moduleName, screenName, target, facts, warning, reached }) => {
+      const folder = slug(moduleName) || 'general';
+      const base = [slug(job.product, 30) || 'product', folder, slug(screenName) || 'page'].join('_');
+      let filename = base + '.png';
+      for (let i = 2; used.has(folder + '/' + filename); i++) filename = base + '-' + i + '.png';
+      const buf = await page.screenshot({ type: 'png', fullPage: false, animations: 'disabled', caret: 'hide' });
+      const dim = png.dimensions(buf);
+      if (dim.width !== size.width || dim.height !== size.height) {
+        throw new CaptureError('The screenshot came out at ' + dim.width + 'x' + dim.height + ' instead of ' + size.width + 'x' + size.height + '.');
+      }
+      used.add(folder + '/' + filename);
+      fs.mkdirSync(path.join(outDir, folder), { recursive: true });
+      fs.writeFileSync(path.join(outDir, folder, filename), buf);
+      job.screens.push({
+        folder, filename, module: moduleName, screen: screenName, target,
+        page_title: facts.title, heading: facts.h1, headings: facts.headings, labels: facts.labels,
+        elements: facts.controls, source_path: pathOnly(page.url()), warning,
+        ...(reached ? { reached_by: reached } : {}),
+      });
+    };
+
     job.stage = 'capturing';
     for (const t of job.targets) {
       job.progress.current = t.raw;
@@ -661,25 +730,7 @@ async function runCapture(job, creds, outDir) {
         const moduleName = home_ ? 'Home' : t.steps ? t.steps[0] : (facts.active_nav || urlPath[0] || 'general');
         const screenName = home_ ? 'Home' : t.steps ? t.steps[t.steps.length - 1]
           : (facts.h1 || titleName(facts.title) || urlPath[urlPath.length - 1] || 'page');
-        const folder = slug(moduleName) || 'general';
-        let base = [slug(job.product, 30) || 'product', folder, slug(screenName) || 'page'].join('_');
-        let filename = base + '.png';
-        for (let i = 2; used.has(folder + '/' + filename); i++) filename = base + '-' + i + '.png';
-        used.add(folder + '/' + filename);
-
-        const buf = await page.screenshot({ type: 'png', fullPage: false, animations: 'disabled', caret: 'hide' });
-        const dim = png.dimensions(buf);
-        if (dim.width !== size.width || dim.height !== size.height) {
-          throw new CaptureError('The screenshot came out at ' + dim.width + 'x' + dim.height + ' instead of ' + size.width + 'x' + size.height + '.');
-        }
-        fs.mkdirSync(path.join(outDir, folder), { recursive: true });
-        fs.writeFileSync(path.join(outDir, folder, filename), buf);
-
-        job.screens.push({
-          folder, filename, module: moduleName, screen: screenName, target: t.raw,
-          page_title: facts.title, heading: facts.h1, headings: facts.headings, labels: facts.labels,
-          elements: facts.controls, source_path: pathOnly(page.url()), warning,
-        });
+        await shoot({ moduleName, screenName, target: t.raw, facts, warning });
       } catch (e) {
         const refused = e.userMessage && /could change data|different site/.test(e.userMessage);
         const entry = { target: t.raw, reason: e.userMessage || ('The page could not be captured: ' + String(e.message || e).split('\n')[0].slice(0, 200)) };
@@ -689,9 +740,268 @@ async function runCapture(job, creds, outDir) {
       job.progress.done++;
     }
     job.progress.current = '';
+
+    // ── The walk ───────────────────────────────────────────────────────────
+    // With no pages listed, it walks the product from the page after sign-in.
+    // With pages listed and the buttons or all level, it opens what is on
+    // each listed page (buttons, tabs, dialogs) but follows no links.
+    if (!job.targets.length || level !== 'links') {
+      job.stage = 'capturing';
+      const followLinks = !job.targets.length;
+      const seeds = [];
+      if (followLinks) seeds.push({ base: home, actions: [], trail: [], parent: null, phase: 1, capture: true, home: true });
+      else {
+        for (const t of job.targets) {
+          const shot = job.screens.find((s) => s.target === t.raw);
+          if (!shot) continue;
+          seeds.push({
+            base: t.url ? (isHome(t) ? home : t.url) : home,
+            actions: t.steps ? t.steps.map((s) => ({ step: s, label: s })) : [],
+            trail: t.steps ? t.steps.slice() : [shot.screen], parent: null, phase: 1, capture: false,
+            seed: { module: shot.module, screen: shot.screen },
+          });
+        }
+      }
+      job.walk = {
+        level, mode: followLinks ? 'walk' : 'list', stopped: '', tried: 0, nochange: 0, gone: 0, failed: 0, left: 0,
+        unnamed: 0, downloads: 0, never: {}, change: {}, window: {}, site: {}, pressed: {},
+      };
+      await walkFrom(seeds, followLinks);
+    }
+
+    /**
+     * Breadth first: every screen one click or link from the start, then two,
+     * and so on. Data-changing buttons (the all level) wait in a second queue
+     * until everything else is done, so a Delete never removes a screen before
+     * it is captured. A screen is the page's kind of address (record numbers
+     * replaced), its open dialog and its chosen tabs; the same screen for
+     * another record is not captured again.
+     */
+    async function walkFrom(seeds, followLinks) {
+      const w = job.walk;
+      const tally = (bucket, label) => { const k = masker(label || '(no name)').slice(0, 60); bucket[k] = (bucket[k] || 0) + 1; };
+      const seenFp = new Set();
+      const seenPat = new Set();
+      const keys = new Set();
+      const q1 = [];
+      const q2 = [];
+      for (const s of seeds) q1.push(s);
+      const pending = () => q1.length + q2.length;
+      const progress = () => {
+        job.progress.done = job.screens.length;
+        job.progress.total = Math.max(job.progress.done, Math.min(MAX_SCREENS, job.screens.length + pending()));
+      };
+      const framePat = (f) => (f === page.mainFrame() ? 'main' : W.urlPattern(f.url()).pattern);
+      const hash = (s) => crypto.createHash('sha1').update(s).digest('hex').slice(0, 16);
+
+      const stateOf = async () => {
+        const out = { dialog: '', tabs: '', h1: '', sig: '' };
+        const sigs = [];
+        for (const f of page.frames()) {
+          const x = await f.evaluate(W.stateInPage).catch(() => null);
+          if (!x) continue;
+          out.dialog = out.dialog || x.dialog;
+          out.tabs = [out.tabs, x.tabs].filter(Boolean).join('+');
+          out.h1 = out.h1 || x.h1;
+          sigs.push(x.sig);
+        }
+        out.sig = hash(sigs.join('#'));
+        return out;
+      };
+
+      const findAction = async (a) => {
+        const frames = page.frames();
+        const ordered = frames.filter((f) => framePat(f) === a.frame).concat(frames.filter((f) => framePat(f) !== a.frame));
+        for (const f of ordered) {
+          const cands = await f.evaluate(W.candidatesInPage).catch(() => []);
+          const c = cands.find((x) => !x.hidden && x.sel === a.sel && x.label === a.label) ||
+            cands.find((x) => !x.hidden && x.label === a.label && x.kind === a.kind);
+          if (c) return { c, loc: f.locator(c.sel).first() };
+        }
+        return null;
+      };
+
+      /** Opens the state's start page, then repeats its clicks in order. */
+      const reach = async (st) => {
+        popup = false;
+        const go = () => acting(async () => {
+          await page.goto(st.base, { waitUntil: 'domcontentloaded', timeout: 45000 });
+          await settle(page);
+        });
+        await go();
+        if (await onSignInPage(page)) {
+          if (!hasCreds) throw new Skip('signin');
+          // The session ended (a timeout, or a link that signed out): sign in once more.
+          await note('found sign-in page');
+          await signInUnguarded();
+          await go();
+          if (await onSignInPage(page)) throw new CaptureError('The site showed its sign-in page again after signing in. The session could not be kept.');
+        }
+        if (!allowedHosts.has(new URL(page.url()).host)) throw new Skip('site', st.trail[st.trail.length - 1]);
+        if (!st.actions.length) return;
+        await acting(async () => {
+          await cleanPage(page, size, false);
+          for (let i = 0; i < st.actions.length; i++) {
+            const a = st.actions[i];
+            const pressing = st.commit && i === st.actions.length - 1;
+            if (a.step) await clickStep(page, a.step);
+            else {
+              const found = await findAction(a);
+              if (!found) throw new Skip('gone', a.label);
+              // The last check before every click: the control on the page now
+              // must pass this level's rules by its own name.
+              const cls = W.classify(found.c);
+              if (cls === 'never' || !W.ALLOWED[level].has(cls)) throw new Skip('changed', a.label);
+              await found.loc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
+              await found.loc.hover({ timeout: 2000 }).catch(() => {});
+              state.acceptDialogs = pressing && level === 'all';
+              try { await safeClick(found.loc); await settle(page); } finally { state.acceptDialogs = false; }
+            }
+            await note('clicked "' + masker(a.label || a.step) + '"');
+            if (popup) throw new Skip('window', a.label || a.step);
+            if (!allowedHosts.has(new URL(page.url()).host)) throw new Skip('site', a.label || a.step);
+          }
+        });
+      };
+
+      const visit = async (st) => {
+        await reach(st);
+        const last = st.actions[st.actions.length - 1];
+        if (st.commit && last) tally(w.pressed, last.label);
+        if (st.commit && !last) tally(w.pressed, st.trail[st.trail.length - 1]);
+        const stillLoading = await waitForQuiet(page);
+        if (!st.actions.length) await cleanPage(page, size, false);
+        const s = await stateOf();
+        const pat = W.urlPattern(page.url());
+        const raw = pat.pattern + (s.dialog ? '|dlg:' + W.norm(s.dialog) : '') + (s.tabs ? '|tab:' + W.norm(s.tabs) : '') +
+          (!pat.hasId && !s.dialog ? '|h1:' + W.norm(s.h1) : '');
+        let fp = raw;
+        if (st.parent && last && raw === st.parent.raw) {
+          // Same page, same dialog: a new screen only if what is on it changed
+          // (a menu, panel or wizard step opened).
+          if (s.sig === st.parent.sig) { w.nochange++; return; }
+          fp = st.parent.fp + '>' + W.norm(last.label);
+        }
+        if (seenFp.has(fp)) return;
+        seenFp.add(fp);
+        seenPat.add(pat.pattern);
+
+        // Controls, read before masking so a later visit finds them by the same name.
+        const deep = st.actions.length < MAX_CLICKS;
+        const cands = [];
+        for (const f of page.frames()) {
+          const fpat = framePat(f);
+          for (const c of await f.evaluate(W.candidatesInPage).catch(() => [])) cands.push({ ...c, frame: fpat, cls: W.classify(c) });
+        }
+
+        const navigated = !st.parent || pat.pattern !== st.parent.pattern;
+        let moduleName = st.seed ? st.seed.module : st.parent ? st.parent.module : 'Home';
+        let screenName = st.seed ? st.seed.screen : 'Home';
+        if (st.capture !== false && job.screens.length < MAX_SCREENS) {
+          if (s.dialog) await page.mouse.move(size.width - 2, size.height - 2).catch(() => {});
+          let facts = await pageFacts(page, { dialog: !!s.dialog });
+          if (facts.body_text < 40 && !s.dialog) { await page.waitForTimeout(4000); await settle(page); }
+          job.masked += await maskPage(page, words);
+          facts = await pageFacts(page, { dialog: !!s.dialog });
+          const warning = facts.body_text < 40 ? 'The page looked empty when it was captured. Check this image.'
+            : stillLoading ? 'The page was still loading after 12 seconds when it was captured. Check this image.' : '';
+          const urlPath = new URL(page.url()).pathname.split('/').filter(Boolean);
+          const parentScreen = st.parent ? st.parent.screen : 'Home';
+          if (st.home) { moduleName = 'Home'; screenName = 'Home'; }
+          else if (navigated && !s.dialog) {
+            moduleName = facts.active_nav || masker(st.trail[0] || '') || urlPath[0] || 'general';
+            screenName = pat.hasId ? parentScreen + ' detail'
+              : (facts.h1 || titleName(facts.title) || masker(st.trail[st.trail.length - 1] || '') || 'page');
+          } else if (s.dialog) {
+            const d = masker(s.dialog);
+            screenName = d && d !== 'dialog' ? d : parentScreen + ' ' + masker(last ? last.label : '');
+          } else screenName = parentScreen + ' ' + masker(last ? last.label : '');
+          await shoot({
+            moduleName, screenName, facts, warning,
+            target: masker(st.trail.join(' > ') || 'Home'),
+            reached: masker(st.trail.join(' > ') || 'the page after sign-in'),
+          });
+          progress();
+        }
+        const node = { raw, fp, sig: s.sig, pattern: pat.pattern, module: moduleName, screen: screenName };
+
+        // What to open next: navigation first, then tabs, other links, then buttons.
+        const rank = (c) => (c.cls === 'commit' ? 9 : c.kind === 'link' && c.inNav ? 0 : c.kind === 'tab' ? 1 : c.kind === 'link' || c.kind === 'menuitem' ? 2 : c.cls === 'reveal' ? 3 : 4);
+        cands.sort((a, b) => rank(a) - rank(b));
+        for (const c of cands) {
+          const cls = c.cls;
+          if (cls === 'never') { if (!c.hidden) tally(w.never, c.label); continue; }
+          if (cls === 'skip') { if (c.download || (c.href && W.FILE_EXT.test(c.href.split(/[?#]/)[0]))) w.downloads++; continue; }
+          if (cls === 'unnamed') { if (!c.hidden) w.unnamed++; continue; }
+          if (!W.ALLOWED[level].has(cls)) { if (cls === 'commit' && !c.hidden) tally(w.change, c.label); continue; }
+          const commit = cls === 'commit';
+          const phase = commit || st.phase === 2 ? 2 : 1;
+          const q = phase === 2 ? q2 : q1;
+          if (c.kind === 'link' && c.href) {
+            if (!followLinks) continue;
+            let h;
+            try { h = new URL(c.href); } catch (_) { continue; }
+            if (!/^https?:$/.test(h.protocol)) continue;
+            if (!allowedHosts.has(h.host)) { if (!c.hidden) tally(w.site, c.label); continue; }
+            const p = W.urlPattern(c.href).pattern;
+            if (seenPat.has(p)) continue;
+            seenPat.add(p);
+            q.push({ base: c.href, actions: [], trail: st.trail.concat(c.label || ''), parent: node, phase, commit, capture: true });
+          } else {
+            if (c.hidden || !deep) continue;
+            if (c.kind === 'link' && !followLinks) continue;
+            const keyBase = s.dialog || /^(next|continue)\b/i.test(c.label) ? fp : raw;
+            const key = keyBase + '|' + c.kind + ':' + W.norm(c.label || c.hint);
+            if (keys.has(key)) continue;
+            keys.add(key);
+            q.push({
+              base: st.base, actions: st.actions.concat({ frame: c.frame, sel: c.sel, label: c.label, kind: c.kind }),
+              trail: st.trail.concat(c.label || 'unnamed'), parent: node, phase, commit,
+              capture: !(cls === 'reveal' && level === 'links'),
+            });
+          }
+        }
+        progress();
+      };
+
+      while (q1.length || q2.length) {
+        if (job.screens.length >= MAX_SCREENS) { w.stopped = 'limit'; break; }
+        if (Date.now() - t0 > WALK_MS) { w.stopped = 'time'; break; }
+        if (w.tried >= MAX_STATES) { w.stopped = 'tries'; break; }
+        const st = q1.length ? q1.shift() : q2.shift();
+        w.tried++;
+        job.progress.current = masker(st.trail.join(' > ') || 'Home');
+        try {
+          await visit(st);
+        } catch (e) {
+          if (e instanceof Skip) {
+            if (e.why === 'window') tally(w.window, e.label);
+            else if (e.why === 'site') tally(w.site, e.label);
+            else w.gone++;
+          } else if (e.userMessage && /could not be kept/.test(e.userMessage)) {
+            w.stopped = 'session';
+            job.not_captured.push({ target: masker(st.trail.join(' > ') || 'Home'), reason: e.userMessage });
+            break;
+          } else {
+            w.failed++;
+            if (job.not_captured.length < 30) {
+              await note('failed ' + masker(st.trail.join(' > ')));
+              job.not_captured.push({
+                target: masker(st.trail.join(' > ') || 'Home'),
+                reason: e.userMessage || ('The screen could not be captured: ' + String(e.message || e).split('\n')[0].slice(0, 160)),
+                debug_image: await debugShot(),
+              });
+            }
+          }
+        }
+      }
+      w.left = pending();
+      progress();
+      job.progress.current = '';
+    }
   } finally {
     await browser.close().catch(() => {});
   }
 }
 
-module.exports = { runCapture, parseTargets, parseSize, slug, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError, DANGER };
+module.exports = { runCapture, parseTargets, parseSize, slug, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError, DANGER, LEVELS, MAX_SCREENS, maskString };

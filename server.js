@@ -1,6 +1,29 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.4.0 (October 2026)
+ * AaGeJa Capture Service — v1.5.0 (October 2026)
+ *
+ * v1.5.0 — the walk: clicks through the product
+ *   - targets may be blank: the service then walks the product from the page
+ *     after sign-in, nearest screens first, up to 100 screenshots and 45
+ *     minutes, and captures each screen it reaches. The same screen for
+ *     another record (/users/123, /users/456) is captured once.
+ *   - click_level (new) says what it clicks:
+ *       links    menu items, tabs and links (the default)
+ *       buttons  also buttons, ⋯ menus, dropdowns, accordions and wizard
+ *                steps; each dialog and form is captured and left unsaved
+ *       all      also buttons that change data (Save, Submit, Delete, Send
+ *                and similar), pressed after everything else is captured.
+ *                The browser then refuses nothing but addresses off the
+ *                public internet, and answers the site's "Are you sure?" yes.
+ *     At every level it never signs out, pays, or acts as another user.
+ *   - With pages listed and the buttons or all level, it opens what is on
+ *     each listed page (buttons, tabs, dialogs) and follows no links.
+ *   - The run report says how the walk went: what it clicked, why it
+ *     stopped, and what it did not click (would change data, never pressed,
+ *     opens a new window, another site, buttons with no name).
+ *   - The description step's answer is read even when it was cut off: every
+ *     complete entry is kept.
+ *   - Page titles are masked like the page text.
  *
  * v1.4.0 — signing in is optional
  *   - The username and password may both be left blank, for an address that
@@ -140,11 +163,11 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const dns = require('node:dns').promises;
-const { runCapture, parseTargets, parseSize, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError } = require('./capture');
+const { runCapture, parseTargets, parseSize, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError, LEVELS } = require('./capture');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
@@ -221,7 +244,14 @@ function parseDescriptions(v) {
     }
   }
   if (x && !Array.isArray(x)) x = x.images || x.screens || x.descriptions || [];
-  return Array.isArray(x) ? x : [];
+  if (Array.isArray(x)) return x;
+  // An answer cut off part way (a long library): keep every complete entry.
+  if (typeof v === 'string') {
+    const out = [];
+    for (const m of v.match(/\{[^{}]*"filename"[^{}]*\}/g) || []) { try { out.push(JSON.parse(m)); } catch (_) {} }
+    return out;
+  }
+  return [];
 }
 
 const mdCell = (t) => String(t || '').replace(/\|/g, '/').replace(/\s+/g, ' ').trim();
@@ -234,6 +264,7 @@ function aiInput(job) {
   return job.screens.map((s, i) => [
     (i + 1) + '. filename: ' + s.filename,
     '   screen: ' + screenLabel(s),
+    ...(s.reached_by ? ['   reached by: ' + s.reached_by] : []),
     '   page title: ' + (s.page_title || ''),
     '   headings: ' + (s.headings || []).join(' | '),
     '   labels: ' + (s.labels || []).slice(0, 20).join(' | '),
@@ -241,9 +272,53 @@ function aiInput(job) {
   ].join('\n')).join('\n\n');
 }
 
+const LEVEL_WORDS = {
+  links: 'opened menu items, tabs and links',
+  buttons: 'opened menu items, tabs, links, buttons and dialogs, and left every form without saving',
+  all: 'opened menu items, tabs, links, buttons and dialogs, and pressed buttons that change data',
+};
+
+/** "Save (3), Delete user, Send" from { label: count }. */
+function listOf(bucket, max = 12) {
+  const e = Object.entries(bucket || {});
+  return e.slice(0, max).map(([k, n]) => mdCell(k) + (n > 1 ? ' (' + n + ')' : '')).join(', ') +
+    (e.length > max ? ', and ' + (e.length - max) + ' more' : '');
+}
+
+/** How the walk went, as Markdown. Empty when the run only captured a list of pages. */
+function walkMd(job) {
+  const w = job.walk;
+  if (!w) return '';
+  const n = job.screens.length;
+  const out = ['**How the capture went through the product**', ''];
+  out.push((w.mode === 'walk' ? 'Starting from the page after sign-in, it ' : 'On each page you listed, it ') + LEVEL_WORDS[w.level] +
+    '. ' + n + ' screenshot' + (n === 1 ? '' : 's') + ' taken.');
+  const left = w.left ? ' ' + w.left + ' more screen' + (w.left === 1 ? ' it found was' : 's it found were') + ' not opened. To capture them, run again with those pages listed.' : '';
+  if (w.stopped === 'limit') out.push('', 'It stopped at the limit of 100 screenshots.' + left);
+  else if (w.stopped === 'time') out.push('', 'It stopped after 45 minutes.' + left);
+  else if (w.stopped === 'tries') out.push('', 'It stopped after trying 600 screens.' + left);
+  else if (w.stopped === 'session') out.push('', 'It stopped because the site kept showing its sign-in page.');
+  else out.push('', 'It opened every screen it found.');
+  out.push('');
+  if (w.level === 'all' && Object.keys(w.pressed).length) out.push('**Buttons pressed that change data:** ' + listOf(w.pressed, 30), '');
+  const rows = [];
+  if (w.level === 'links') rows.push('- **Buttons and dialogs:** not opened. Choose "Also open buttons and dialogs" to capture them.');
+  if (w.level !== 'all' && Object.keys(w.change).length) rows.push('- **Would change data, so not pressed:** ' + listOf(w.change) + '. Choose "Also press buttons that change data" to include them.');
+  if (Object.keys(w.never).length) rows.push('- **Never pressed:** ' + listOf(w.never) + '. Signing out, paying and acting as another user are never done.');
+  if (Object.keys(w.window).length) rows.push('- **Open a new window, so not followed:** ' + listOf(w.window));
+  if (Object.keys(w.site).length) rows.push('- **On another site, so not followed:** ' + listOf(w.site));
+  if (w.unnamed) rows.push('- **Buttons with no name, so not clicked:** ' + w.unnamed);
+  if (w.downloads) rows.push('- **Downloads, not opened:** ' + w.downloads);
+  if (w.gone) rows.push('- **Could not be reached again:** ' + w.gone + ' (the page had changed since the control was found).');
+  if (rows.length) out.push('**Not clicked**', '', ...rows, '');
+  return out.join('\n');
+}
+
 /** What was not captured and what to check, as Markdown. Empty when there is nothing to report. */
 function reportMd(job) {
   const out = [];
+  const walk = walkMd(job);
+  if (walk) out.push(walk);
   if (job.not_captured.length) {
     out.push('**Not captured**', '');
     for (const n of job.not_captured) out.push('- ' + mdCell(n.target) + ' — ' + mdCell(n.reason));
@@ -256,10 +331,14 @@ function reportMd(job) {
     out.push('');
   }
   if (job.background_requests) {
-    out.push('**Requests the pages made while loading**', '',
-      'The capture only opened pages and menu items. While they loaded, the pages themselves sent ' +
-      job.background_requests + ' request' + (job.background_requests === 1 ? '' : 's') +
-      ' that were not plain reads, as they do for anyone viewing them:', '');
+    const nreq = job.background_requests + ' request' + (job.background_requests === 1 ? '' : 's');
+    const lvl = job.walk ? job.walk.level : 'links';
+    const intro = lvl === 'all'
+      ? 'The capture pressed buttons that change data. While it worked, the pages sent ' + nreq + ' that were not plain reads:'
+      : lvl === 'buttons'
+        ? 'The capture opened pages, menus, buttons and dialogs and pressed no button that changes data. While it worked, the pages sent ' + nreq + ' that were not plain reads, as they do for anyone using them:'
+        : 'The capture only opened pages and menu items. While they loaded, the pages themselves sent ' + nreq + ' that were not plain reads, as they do for anyone viewing them:';
+    out.push(lvl === 'links' ? '**Requests the pages made while loading**' : '**Requests the pages made**', '', intro, '');
     for (const r of job.background) out.push('- ' + mdCell(r));
     if (job.background.length < job.background_requests) out.push('- (and repeats of these)');
     out.push('');
@@ -277,6 +356,8 @@ function publicJob(job, req) {
     progress: job.progress,
     product: job.product,
     client: job.client,
+    click_level: job.click_level,
+    mode: job.targets.length ? 'list' : 'walk',
     environment_url: job.environment_url,
     image_size: job.size.width + 'x' + job.size.height,
     captured_count: job.screens.length,
@@ -310,7 +391,7 @@ async function pump() {
   delete job._creds;
   job.status = 'running';
   job.started = Date.now();
-  console.log('[job ' + job.id + '] started: ' + job.targets.length + ' target(s)');
+  console.log('[job ' + job.id + '] started: ' + (job.targets.length ? job.targets.length + ' target(s)' : 'walk') + ', clicking ' + job.click_level);
   try {
     await runCapture(job, creds, path.join(WORK_DIR, job.id));
     job.status = job.screens.length ? 'captured' : 'failed';
@@ -377,9 +458,11 @@ async function start(req, res) {
   // Both, or neither for an address that opens without signing in.
   if (!!username.trim() !== !!password) throw new CaptureError('Enter both the username and the password, or leave both blank if the address opens the product without signing in.');
   const env = await checkEnvironment(body.environment_url);
-  const mode = String(body.mode || 'guided').toLowerCase();
-  if (mode !== 'guided') throw new CaptureError('This version captures a list of pages (Guided). Full crawl and Refresh are not available yet.');
+  // links (default), buttons or all. See the v1.5.0 notes.
+  const clickLevel = String(body.click_level || 'links').trim().toLowerCase();
+  if (!LEVELS.includes(clickLevel)) throw new CaptureError('Clicking must be links, buttons or all.');
 
+  // No pages listed: the service walks the product.
   const targets = parseTargets(body.targets, env.href);
   const size = parseSize(body.image_size);
   const maskWords = (Array.isArray(body.mask_words) ? body.mask_words : String(body.mask_words || '').split(/[\n,]/))
@@ -388,8 +471,8 @@ async function start(req, res) {
   const id = crypto.randomBytes(12).toString('hex');
   const job = {
     id, status: 'queued', stage: '', created: Date.now(),
-    product, client, environment_url: env.href, size, mask_words: maskWords, targets,
-    progress: { done: 0, total: targets.length, current: '' },
+    product, client, environment_url: env.href, size, mask_words: maskWords, targets, click_level: clickLevel,
+    progress: { done: 0, total: targets.length || 1, current: '' },
     screens: [], not_captured: [], masked: 0, blocked_requests: 0, blocked: [], trace: [], debug_image: '',
     background_requests: 0, background: [],
     _creds: { username, password },
