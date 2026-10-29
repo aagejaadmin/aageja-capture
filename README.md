@@ -20,10 +20,10 @@ Separate from content-api so a browser's memory use never touches content produc
 ## The library
 
 - Every library is kept by this service for 24 hours (`RETENTION_HOURS`), then deleted. The links carry a 128-bit random token and stop working when the time is up.
-- **Link for the Storyboard Designer:** `…/library/<token>/library.json`. Paste it into the Storyboard Designer's Screenshot Library URL field within the 24 hours. The Storyboard Designer reads each screen's description from it.
+- **Library link:** `…/library/<token>/library.json`. Shown to the customer only as the **Continue link** when a walk left screens: it lasts 24 hours, too short for storyboards. Storyboards read the customer's own copy (next point).
 - **Download:** `…/library/<token>/screenshots.zip`: the images in their folders, `library.json`, `screenshot-catalogue.pdf` and a `READ ME.txt`.
 - **Catalogue (1.6.0):** `…/library/<token>/screenshots.pdf`: every screenshot with its name and description, then how the capture went. Made from a smaller JPEG copy of each screenshot.
-- **To keep the screenshots,** the customer unzips the download and uploads it to a folder anyone can open by link: a public GitHub repository, a public Amazon S3 or Google Cloud Storage bucket, or a public web folder. In `library.json` each image's link is relative to the file (`home/x.png`), so it still works there. Then they paste that folder's link (GitHub) or the link to its `library.json` (anywhere else) into the Storyboard Designer.
+- **To keep the screenshots,** the customer unzips the download and uploads it to a folder anyone can open by link: a public GitHub repository, a public Amazon S3 or Google Cloud Storage bucket, or a public web folder. In `library.json` each image's link is relative to the file (`home/x.png`), so it still works there. Then they paste that folder's link (GitHub) or the link to its `library.json` (anywhere else) into the Storyboard and Lab Guide Developer.
 - Google Drive, SharePoint and OneDrive cannot be used: storyboards and slide decks cannot open images from them by link.
 - No account or key of AaGeJa's touches a customer's storage. (Saving straight to GitHub, S3 or Google Cloud Storage was built and is kept on the `capture-storage-options` branch, not deployed.)
 

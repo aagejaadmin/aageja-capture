@@ -15,9 +15,11 @@
  *     name and description, then how the capture went. On its own link and
  *     in the zip. Made from a smaller JPEG copy of each screenshot taken at
  *     capture, so it stays small enough to share.
- *   - The summary names the library link for what it is: the link for the
- *     Storyboard Designer's Screenshot Library URL field. When screens were
- *     left, it says how many and how to capture the next ones.
+ *   - The summary leads with the download and how to put it in the
+ *     customer's own shared folder for the Storyboard and Lab Guide
+ *     Developer, which reads it for as many storyboards as need it. The
+ *     24-hour library link is shown only as the Continue link, when screens
+ *     were left, with how many and how to capture the next ones.
  *   - Fixed: in a walk, pages whose address carries a number (almost every
  *     page on some products) were named "<previous screen> detail". Every page
  *     is now named by its own heading.
@@ -62,7 +64,7 @@
  *     anyone with the link can open: library.json, each image, and a zip of
  *     everything. The links carry a 128-bit random token and stop working
  *     when the time is up. The customer downloads the zip and puts the
- *     screenshots in their own folder; the Storyboard Designer reads a GitHub,
+ *     screenshots in their own folder; the Storyboard and Lab Guide Developer reads a GitHub,
  *     S3, Google Cloud Storage or web folder.
  *   - library.json lists each image by a link relative to itself
  *     ("home/x.png"), so it still works after the folder is uploaded anywhere.
@@ -614,11 +616,11 @@ async function finalize(req, res, job) {
     '',
     'screenshot-catalogue.pdf shows every screenshot with its name and description, for reviewing and sharing.',
     '',
-    'To keep these screenshots and use them in storyboards:',
+    'To use these screenshots in storyboards and lab guides:',
     '',
-    '1. Unzip this file. Keep the folders as they are. library.json lists every screenshot with its description; the Storyboard Designer reads it.',
+    '1. Unzip this file. Keep the folders as they are. library.json lists every screenshot with its description; the Storyboard and Lab Guide Developer reads it.',
     '2. Upload everything to a folder anyone can open by link: a public GitHub repository, a public Amazon S3 or Google Cloud Storage bucket, or a public web folder. Google Drive, SharePoint and OneDrive cannot be used: storyboards and slide decks cannot open images from them by link.',
-    '3. In the Storyboard Designer, paste the link into the Screenshot Library URL field: for GitHub, the link to the folder; for anywhere else, the link to library.json in it.',
+    '3. In the Storyboard and Lab Guide Developer, paste the link into the Screenshot Library URL field: for GitHub, the link to the folder; for anywhere else, the link to library.json in it. Use the same link for every storyboard and lab guide that needs these screenshots.',
     '',
   ].join('\r\n'), 'utf8');
   let pdf = null;
@@ -661,23 +663,26 @@ async function finalize(req, res, job) {
   job.library_rows = rows.map((r) => ({ ...r, url: base + r.url }));
   console.log('[job ' + job.id + '] library ready: ' + rows.length + ' image(s)' + (earlier ? ' (' + earlier + ' from earlier runs)' : '') + (pdf ? ', catalogue' : '') + ', kept ' + RETENTION_HOURS + ' hours');
   const n = rows.length - earlier;
+  // The download is what lasts: the customer puts it in their own shared
+  // folder, and every storyboard reads it from there. The library link is
+  // shown only to continue a walk, which has to happen within the 24 hours.
   const md = [
-    '**Link for the Storyboard Designer:** ' + job.library.library_url,
+    '**Download your screenshots:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + ')',
     '',
-    'Paste this link into the Storyboard Designer\'s **Screenshot Library URL** field. It finds every screenshot and its description from it.',
+    'To use them in storyboards and lab guides, unzip the download and upload everything, keeping its folders, to a folder anyone can open by link: a public GitHub repository, or a public Amazon S3 or Google Cloud Storage bucket (not Google Drive, SharePoint or OneDrive: their links do not open the images). Then paste that folder\'s link (on GitHub) or the link to library.json in it (anywhere else) into the **Screenshot Library URL** field of the **Storyboard and Lab Guide Developer**, for every storyboard and lab guide that needs these screenshots. The READ ME in the download says the same.',
     '',
-    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): every screenshot with its name and description, to review or share.', ''] : []),
-    '**Download all screenshots:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + ')',
-    '',
-    '**These links work until ' + whenUtc(job.expires) + '.** Make the storyboard and the slide deck before then. To keep the screenshots, download the zip: the READ ME inside says how to put them in your own folder.',
+    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): every screenshot with its name and description, to review or share. It is also in the download.', ''] : []),
+    '**These download links work until ' + whenUtc(job.expires) + '.** Download the files before then.',
     '',
     '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', each ' + job.size.width + ' × ' + job.size.height +
-      (earlier ? ': ' + n + ' new in this run, and ' + earlier + ' from the earlier run' + (job.runs > 2 ? 's' : '') + '. This link has all of them.' : ''),
+      (earlier ? ': ' + n + ' new in this run, and ' + earlier + ' from the earlier run' + (job.runs > 2 ? 's' : '') + '. The download has all of them.' : ''),
     '',
   ];
   if (remaining) {
-    md.push('**' + remaining + ' more screen' + (remaining === 1 ? ' was' : 's were') + ' found but not captured yet.** To capture the next ' + Math.min(remaining, MAX_SCREENS) +
-      ', run the agent again within 24 hours with the same environment address and sign-in, leave Pages blank, and paste the link for the Storyboard Designer above into **Continue From**. The next run adds its screenshots to these, and its link will have all of them.', '');
+    md.push('**Capture the next screens:** ' + remaining + ' more screen' + (remaining === 1 ? ' was' : 's were') + ' found but not captured yet. To capture the next ' + Math.min(remaining, MAX_SCREENS) +
+      ', run the agent again before ' + whenUtc(job.expires) + ' with the same environment address and sign-in, leave Pages blank, and paste this link into **Continue From**:', '',
+      '**Continue link:** ' + job.library.library_url, '',
+      'The next run\'s download has every screenshot from this run and the next.', '');
   }
   md.push(earlier ? '**New in this run**' : '**Screenshots**', '', '| Screen | Description |', '|---|---|');
   job.library_rows.slice(earlier).forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
