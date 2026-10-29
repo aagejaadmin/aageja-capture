@@ -107,7 +107,7 @@ function slug(s, max = 40) {
 
 /** "Welcome - Realize Your Potential: Site Name" -> "Welcome". */
 function titleName(t) {
-  return String(t || '').split(/\s+[-–—|]\s+|:\s+/)[0].trim();
+  return String(t || '').split(/\s+[-–—|·•»]\s+|:\s+/)[0].trim();
 }
 
 // ── Page helpers ───────────────────────────────────────────────────────────
@@ -314,13 +314,24 @@ async function cleanPage(page, size, keepOpen) {
 
 /**
  * Waits until the page has finished drawing: no visible loading indicators
- * (placeholder bars, shimmer, spinners, progress bars, busy regions) and the
- * on-screen text unchanged across three checks a second apart. Gives up after
- * maxMs and returns whether the page was still loading.
+ * (skeleton or shimmer bars, spinners, loaders, progress bars, busy regions)
+ * and the on-screen text unchanged across three checks a second apart, or
+ * only cycling (a carousel). Gives up after maxMs. Returns true (still
+ * loading) only when a loading indicator is still on screen: text that keeps
+ * changing with no indicator (a live feed, a clock) is not loading.
+ * A class counts only as a whole word between - or _ ("spinner",
+ * "is-loading"), so "content-uploader" or "loaded" do not.
  */
 async function waitForQuiet(page, maxMs = 12000) {
   const probe = () => {
-    const SEL = '[aria-busy="true"], [role=progressbar], [class*="skeleton" i], [class*="shimmer" i], [class*="placeholder" i], [class*="spinner" i], [class*="loader" i], [class*="loading" i]';
+    const SEL = '[aria-busy="true"], [role=progressbar], [class*="skeleton" i], [class*="shimmer" i], [class*="spinner" i], [class*="loader" i], [class*="loading" i]';
+    const WORD = /(^|[-_])(skeleton|shimmer|spinner|loader|loading|preloader)([-_]|$)/i;
+    const DONE = /(^|[-_])(done|complete|completed|loaded|finished|hidden|hide)([-_]|$)/i;
+    const loaderClass = (el) => {
+      if (el.matches('[aria-busy="true"], [role=progressbar]')) return true;
+      const tokens = (el.getAttribute('class') || '').split(/\s+/);
+      return tokens.some((t) => WORD.test(t)) && !tokens.some((t) => DONE.test(t));
+    };
     const vis = (el) => {
       const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
       return r.width > 4 && r.height > 4 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05 &&
@@ -329,7 +340,7 @@ async function waitForQuiet(page, maxMs = 12000) {
     let busy = 0;
     for (const el of document.querySelectorAll(SEL)) {
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'IMG') continue;
-      if (vis(el)) busy++;
+      if (loaderClass(el) && vis(el)) busy++;
     }
     return { busy, text: (document.body ? document.body.innerText : '').length };
   };
@@ -342,15 +353,20 @@ async function waitForQuiet(page, maxMs = 12000) {
     return { busy, text };
   };
   const end = Date.now() + maxMs;
-  let last = null, same = 0, s = null;
+  let last = null, same = 0, s = null, n = 0;
+  const lengths = new Set();
   while (Date.now() < end) {
     s = await sample();
+    n++;
     same = last && s.text === last.text ? same + 1 : 0;
     if (s.busy === 0 && same >= 2) return false;
+    // Text back to a length already seen, with nothing loading: a carousel.
+    if (s.busy === 0 && n >= 3 && last && s.text !== last.text && lengths.has(s.text)) return false;
+    lengths.add(s.text);
     last = s;
     await page.waitForTimeout(1000);
   }
-  return true;
+  return !!(s && s.busy > 0);
 }
 
 /** Replaces email addresses, phone numbers and the user's own words on screen. */
@@ -407,6 +423,16 @@ function factsInPage(arg) {
   const txt = (el) => (el.innerText || el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.value || el.title || '')
     .replace(/\s+/g, ' ').trim().slice(0, 80);
   const uniq = (a) => [...new Set(a.filter(Boolean))];
+  // A heading is the screen's name only when it is seen: not one hidden for
+  // screen readers (a pixel square, clipped, or transparent).
+  const seen = (el) => {
+    if (!vis(el)) return false;
+    const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+    if (r.width <= 2 || r.height <= 2 || Number(s.opacity) <= 0.05) return false;
+    if (/rect\(\s*0(px)?[\s,]+0(px)?[\s,]+0(px)?[\s,]+0(px)?\s*\)/.test(s.clip || '')) return false;
+    if (/inset\(\s*(50|100)%/.test(s.clipPath || '')) return false;
+    return true;
+  };
   const DLG = '[role=dialog], [role=alertdialog], dialog[open], [aria-modal="true"], .modal.show, .modal.in, .ui-dialog, .k-window, .ReactModal__Content';
   const top = arg && arg.dialog ? [...document.querySelectorAll(DLG)].filter(vis).pop() || null : null;
   const root = top || document;
@@ -443,8 +469,8 @@ function factsInPage(arg) {
   }
   return {
     title: document.title || '',
-    h1: (all(top ? 'h1, h2, h3, h4, [role=heading], .modal-title, .ui-dialog-title' : 'h1, [role=heading][aria-level="1"]').map(txt).filter(Boolean)[0]) || '',
-    headings: uniq(all('h1, h2, h3, [role=heading]').map(txt)).slice(0, 12),
+    h1: (all(top ? 'h1, h2, h3, h4, [role=heading], .modal-title, .ui-dialog-title' : 'h1, [role=heading][aria-level="1"]').filter(seen).map(txt).filter(Boolean)[0]) || '',
+    headings: uniq(all('h1, h2, h3, [role=heading]').filter(seen).map(txt)).slice(0, 12),
     labels: uniq(all('label, th, legend, dt').map(txt)).slice(0, 25),
     controls: uniq(controls).slice(0, 60),
     active_nav: active && vis(active) ? txt(active).replace(/(\s+\d+)+$/, '').trim() : '',
