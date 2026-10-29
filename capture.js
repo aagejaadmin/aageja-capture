@@ -1010,7 +1010,11 @@ async function runCapture(job, creds, outDir) {
             if (c.kind === 'link' && !followLinks) continue;
             // A control in the site's navigation (a menu button in the header)
             // is the same on every page: opened once for the whole walk.
-            const keyBase = (cls === 'reveal' || c.inNav) && !s.dialog ? 'site-navigation' : s.dialog || /^(next|continue)\b/i.test(c.label) ? fp : raw;
+            // A button that changes data is pressed once per screen, not once for
+            // each tab chosen behind it (one password reset, not three).
+            const keyBase = (cls === 'reveal' || c.inNav) && !s.dialog ? 'site-navigation'
+              : cls === 'commit' && !s.dialog ? raw.replace(/\|tab:[^|]*/, '')
+              : s.dialog || /^(next|continue)\b/i.test(c.label) ? fp : raw;
             const key = keyBase + '|' + c.kind + ':' + W.norm(c.label || c.hint);
             if (keys.has(key)) continue;
             keys.add(key);
