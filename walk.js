@@ -52,6 +52,10 @@ const NAV_MENU = /(\bmenu\b|\bnavigation\b|\bnav\b|☰)/i;
 const NAV_HINT = /(hamburger|navbar-toggler|menu-toggle|nav-toggle)/i;
 const MORE_WORD = /(\bmore\b|\bactions\b|\boptions\b|⋯|⋮|…|▾|▼)/i;
 
+ // A page that shows the site's error message instead of a screen: never
+// kept, and nothing on it is opened. Tested on its headings and title.
+const ERROR_PAGE = /(\ban?\s+(unexpected\s+)?error\s+(has\s+)?occurred|\berror\s+occurred\s+while\s+processing|\bsomething\s+went\s+wrong|\bpage\s+(was\s+)?not\s+found|\b404\b|\binternal\s+server\s+error|\baccess\s+denied|\bnot\s+authori[sz]ed\b|\byou\s+do\s+not\s+have\s+(permission|access)|\bforbidden\b|\bsession\s+(has\s+)?(expired|timed\s+out))/i;
+
 const FILE_EXT = /\.(pdf|docx?|xlsx?|csv|pptx?|zip|rar|7z|gz|tar|mp4|mov|avi|mp3|wav|png|jpe?g|gif|svg|ics|exe|dmg|msi)$/i;
 
 const norm = (s) => String(s || '').toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
@@ -170,4 +174,4 @@ function stateInPage() {
   return { dialog, tabs, h1, sig };
 }
 
-module.exports = { NEVER, LINK_DANGER, COMMIT, OPENER, SKIP, classify, ALLOWED, urlPattern, addressWords, norm, stateInPage, FILE_EXT };
+module.exports = { NEVER, LINK_DANGER, COMMIT, OPENER, SKIP, ERROR_PAGE, classify, ALLOWED, urlPattern, addressWords, norm, stateInPage, FILE_EXT };

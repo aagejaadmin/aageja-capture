@@ -15,11 +15,23 @@
  *     name and description, then how the capture went. On its own link and
  *     in the zip. Made from a smaller JPEG copy of each screenshot taken at
  *     capture, so it stays small enough to share.
- *   - The summary leads with the download and how to put it in the
- *     customer's own shared folder for the Storyboard and Lab Guide
- *     Developer, which reads it for as many storyboards as need it. The
- *     24-hour library link is shown only as the Continue link, when screens
- *     were left, with how many and how to capture the next ones.
+ *   - The walk skips a page that shows the site's error message (not kept,
+ *     nothing on it opened; listed in the report under Opened, but not
+ *     kept) and a page that is the same as a screen already captured: the
+ *     same title, headings, labels, controls and text on screen, numbers
+ *     aside (Home and Welcome). Kept across Continue runs. A listed page
+ *     that shows the error message goes in Not captured.
+ *   - The Library Ready summary is short: the download first, with how to
+ *     put it in the customer's own shared folder for the Storyboard and Lab
+ *     Guide Developer (which reads it for every storyboard), the PDF, when
+ *     the links stop, counts of what was not captured or needs checking,
+ *     and the Continue link only when links and buttons were left. The
+ *     24-hour library link is never offered for storyboards. The
+ *     screenshots and the full report are in the PDF (on the screen only if
+ *     the PDF could not be made).
+ *   - What a walk left is counted as links and buttons not tried yet, not
+ *     screens: many lead to screens already captured.
+ *   - The READ ME names the Storyboard and Lab Guide Developer.
  *   - Fixed: in a walk, pages whose address carries a number (almost every
  *     page on some products) were named "<previous screen> detail". Every page
  *     is now named by its own heading.
@@ -316,8 +328,8 @@ function walkMd(job) {
   const out = ['**How the capture went through the product**', ''];
   out.push((job.resume ? 'Carrying on from the earlier run, with its clicking choice, it ' : w.mode === 'walk' ? 'Starting from the page after sign-in, it ' : 'On each page you listed, it ') + LEVEL_WORDS[w.level] +
     '. ' + n + ' screenshot' + (n === 1 ? '' : 's') + ' taken' + (job.resume ? ' in this run' : '') + '.');
-  const left = w.left ? ' ' + w.left + ' more screen' + (w.left === 1 ? ' it found was' : 's it found were') + ' not opened.' +
-    (w.mode === 'walk' ? ' To capture them, run again with this library\'s link in Continue From.' : '') : '';
+  const left = w.left ? ' ' + w.left + ' link' + (w.left === 1 ? '' : 's') + ' and button' + (w.left === 1 ? '' : 's') + ' it found were not tried yet; many lead to screens already captured.' +
+    (w.mode === 'walk' ? ' To try them, run again with the Continue link in Continue From.' : '') : '';
   if (w.stopped === 'limit') out.push('', 'It stopped at the limit of ' + MAX_SCREENS + ' screenshots a run.' + left);
   else if (w.stopped === 'time') out.push('', 'It stopped after 45 minutes.' + left);
   else if (w.stopped === 'tries') out.push('', 'It stopped after trying 600 screens.' + left);
@@ -336,6 +348,10 @@ function walkMd(job) {
   if (w.downloads) rows.push('- **Downloads, not opened:** ' + w.downloads);
   if (w.gone) rows.push('- **Could not be reached again:** ' + w.gone + ' (the page had changed since the control was found).');
   if (rows.length) out.push('**Not clicked**', '', ...rows, '');
+  const kept = [];
+  if (Object.keys(w.errors || {}).length) kept.push('- **Showed the site\'s error message, so not kept, and nothing on it was opened:** ' + listOf(w.errors, 30));
+  if (w.same) kept.push('- **The same as a screen already captured, so not kept again:** ' + w.same);
+  if (kept.length) out.push('**Opened, but not kept**', '', ...kept, '');
   return out.join('\n');
 }
 
@@ -403,7 +419,7 @@ function publicJob(job, req) {
     blocked: job.blocked,
     background: job.background,
     library: job.library || null,
-    walk: job.walk ? { level: job.walk.level, mode: job.walk.mode, stopped: job.walk.stopped, tried: job.walk.tried, unchanged: job.walk.nochange, not_reached: job.walk.left, failed: job.walk.failed } : null,
+    walk: job.walk ? { level: job.walk.level, mode: job.walk.mode, stopped: job.walk.stopped, tried: job.walk.tried, unchanged: job.walk.nochange, same: job.walk.same || 0, error_pages: Object.keys(job.walk.errors || {}).length, not_reached: job.walk.left, failed: job.walk.failed } : null,
   };
 }
 
@@ -663,33 +679,44 @@ async function finalize(req, res, job) {
   job.library_rows = rows.map((r) => ({ ...r, url: base + r.url }));
   console.log('[job ' + job.id + '] library ready: ' + rows.length + ' image(s)' + (earlier ? ' (' + earlier + ' from earlier runs)' : '') + (pdf ? ', catalogue' : '') + ', kept ' + RETENTION_HOURS + ' hours');
   const n = rows.length - earlier;
-  // The download is what lasts: the customer puts it in their own shared
-  // folder, and every storyboard reads it from there. The library link is
-  // shown only to continue a walk, which has to happen within the 24 hours.
+  // The screen says only what to do: get the download into the customer's
+  // own shared folder (it lasts; every storyboard reads it from there), the
+  // PDF, when the links stop, a short outcome, and the Continue link when a
+  // walk left links and buttons to try. The screenshots and the full report
+  // are in the PDF; the table is shown only if the PDF could not be made.
+  const toCheck = job.screens.filter((x) => x.warning).length;
+  const w = job.walk;
+  const errorPages = w ? Object.keys(w.errors || {}).length : 0;
   const md = [
     '**Download your screenshots:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + ')',
     '',
     'To use them in storyboards and lab guides, unzip the download and upload everything, keeping its folders, to a folder anyone can open by link: a public GitHub repository, or a public Amazon S3 or Google Cloud Storage bucket (not Google Drive, SharePoint or OneDrive: their links do not open the images). Then paste that folder\'s link (on GitHub) or the link to library.json in it (anywhere else) into the **Screenshot Library URL** field of the **Storyboard and Lab Guide Developer**, for every storyboard and lab guide that needs these screenshots. The READ ME in the download says the same.',
     '',
-    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): every screenshot with its name and description, to review or share. It is also in the download.', ''] : []),
+    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): every screenshot with its name and description, then how the capture went. It is also in the download.', ''] : []),
     '**These download links work until ' + whenUtc(job.expires) + '.** Download the files before then.',
     '',
     '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', each ' + job.size.width + ' × ' + job.size.height +
-      (earlier ? ': ' + n + ' new in this run, and ' + earlier + ' from the earlier run' + (job.runs > 2 ? 's' : '') + '. The download has all of them.' : ''),
-    '',
+      (earlier ? ': ' + n + ' new in this run, and ' + earlier + ' from the earlier run' + (job.runs > 2 ? 's' : '') + '. The download has all of them.' : '.'),
   ];
+  if (job.not_captured.length) md.push('', '**Not captured:** ' + job.not_captured.length + ' page' + (job.not_captured.length === 1 ? '' : 's') + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
+  if (errorPages) md.push('', '**Showed the site\'s error message, so not kept:** ' + errorPages + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
+  if (toCheck) md.push('', '**Check:** ' + toCheck + ' screenshot' + (toCheck === 1 ? '' : 's') + ' that ' + (toCheck === 1 ? 'was' : 'were') + ' still loading or looked empty' + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
+  if (missing) md.push('', '_' + missing + ' description' + (missing === 1 ? ' was' : 's were') + ' not written, so ' + (missing === 1 ? 'it uses' : 'they use') + ' the screen name._');
+  md.push('');
   if (remaining) {
-    md.push('**Capture the next screens:** ' + remaining + ' more screen' + (remaining === 1 ? ' was' : 's were') + ' found but not captured yet. To capture the next ' + Math.min(remaining, MAX_SCREENS) +
-      ', run the agent again before ' + whenUtc(job.expires) + ' with the same environment address and sign-in, leave Pages blank, and paste this link into **Continue From**:', '',
+    md.push('**Capture more:** this run stopped with ' + remaining + ' link' + (remaining === 1 ? '' : 's') + ' and button' + (remaining === 1 ? '' : 's') + ' not tried yet. Many lead to screens already captured, so the next run captures fewer new screens than that. To try them, run the agent again before ' + whenUtc(job.expires) +
+      ' with the same environment address and sign-in, leave Pages blank, and paste this link into **Continue From**:', '',
       '**Continue link:** ' + job.library.library_url, '',
       'The next run\'s download has every screenshot from this run and the next.', '');
   }
-  md.push(earlier ? '**New in this run**' : '**Screenshots**', '', '| Screen | Description |', '|---|---|');
-  job.library_rows.slice(earlier).forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
-  md.push('');
-  if (missing) md.push('_' + missing + ' description' + (missing === 1 ? ' was' : 's were') + ' not written, so ' + (missing === 1 ? 'it uses' : 'they use') + ' the screen name._', '');
-  const rep = reportMd(job);
-  if (rep) md.push(rep);
+  if (!pdf) {
+    // No catalogue: the screenshots and the report go on the screen instead.
+    md.push(earlier ? '**New in this run**' : '**Screenshots**', '', '| Screen | Description |', '|---|---|');
+    job.library_rows.slice(earlier).forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
+    md.push('');
+    const rep = reportMd(job);
+    if (rep) md.push(rep);
+  }
   job.library.summary_md = md.join('\n');
   send(res, 200, { ...job.library, images: job.library_rows, not_captured: notCaptured });
 }

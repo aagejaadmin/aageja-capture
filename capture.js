@@ -735,6 +735,12 @@ async function runCapture(job, creds, outDir) {
           await settle(page);
           await cleanPage(page, size, keepOpen);
         }
+        facts = await pageFacts(page);
+        // A listed page that shows the site's error message is not kept: it
+        // goes in Not captured, and the walk opens nothing on it.
+        if (W.ERROR_PAGE.test([facts.h1, facts.title, ...(facts.headings || []).slice(0, 3)].join(' | '))) {
+          throw new CaptureError('The page showed the site\'s error message, so it was not kept.');
+        }
         job.masked += await maskPage(page, words);
         facts = await pageFacts(page);
         const warning = facts.body_text < 40 ? 'The page looked empty when it was captured. Check this image.'
@@ -750,7 +756,7 @@ async function runCapture(job, creds, outDir) {
           : (facts.h1 || titleName(facts.title) || urlPath[urlPath.length - 1] || 'page');
         await shoot({ moduleName, screenName, target: t.raw, facts, warning });
       } catch (e) {
-        const refused = e.userMessage && /could change data|different site/.test(e.userMessage);
+        const refused = e.userMessage && /could change data|different site|error message/.test(e.userMessage);
         const entry = { target: t.raw, reason: e.userMessage || ('The page could not be captured: ' + String(e.message || e).split('\n')[0].slice(0, 200)) };
         if (!refused) { await note('failed ' + t.raw); entry.debug_image = await debugShot(); }
         job.not_captured.push(entry);
@@ -783,7 +789,7 @@ async function runCapture(job, creds, outDir) {
       }
       job.walk = {
         level, mode: followLinks ? 'walk' : 'list', stopped: '', tried: 0, nochange: 0, gone: 0, failed: 0, left: 0,
-        unnamed: 0, downloads: 0, never: {}, change: {}, confirmed: {}, window: {}, site: {}, pressed: {},
+        unnamed: 0, downloads: 0, same: 0, errors: {}, never: {}, change: {}, confirmed: {}, window: {}, site: {}, pressed: {},
       };
       await walkFrom(seeds, followLinks);
     }
@@ -803,6 +809,9 @@ async function runCapture(job, creds, outDir) {
       // Continuing an earlier walk: what it saw is seen, what it left is the queue.
       const R = job.resume || {};
       const seenFp = new Set(R.seenFp || []);
+      // What is on each captured screen (its content summary): the same content
+      // under another address (Home and Welcome) is not captured twice.
+      const seenSig = new Set(R.seenSig || []);
       const seenPat = new Set(R.seenPat || []);
       const keys = new Set(R.keys || []);
       const downloads = new Set(R.downloads || []);
@@ -952,6 +961,27 @@ async function runCapture(job, creds, outDir) {
         seenFp.add(fp);
         seenPat.add(pat.pattern);
 
+        // The site's error page ("An error occurred while processing your
+        // request") is not a screen: not kept, and nothing on it is opened.
+        const heads = await page.evaluate(() => [...document.querySelectorAll('h1, h2, [role=heading]')].filter((e) => e.offsetParent !== null)
+          .slice(0, 3).map((e) => (e.innerText || '').trim().slice(0, 120)).join(' | ')).catch(() => '');
+        if (W.ERROR_PAGE.test([s.h1, s.dialog, await page.title().catch(() => ''), heads].join(' | '))) {
+          tally(w.errors, st.trail.join(' > ') || 'Home');
+          return;
+        }
+        // The same content as a screen already captured (Home and Welcome):
+        // not kept again. Same means the same title, headings, labels and
+        // controls, and the same text on screen, numbers aside.
+        let same = s.sig;
+        if (st.capture !== false) {
+          const texts = [await page.title().catch(() => '')];
+          for (const f of page.frames()) {
+            texts.push(await f.evaluate(() => (document.body ? document.body.innerText : '').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 20000)).catch(() => ''));
+          }
+          same = hash(s.sig + '#' + texts.join('#'));
+          if (seenSig.has(same)) { w.same++; return; }
+        }
+
         // Controls, read before masking so a later visit finds them by the same name.
         const deep = st.actions.length < MAX_CLICKS;
         const cands = [];
@@ -984,6 +1014,7 @@ async function runCapture(job, creds, outDir) {
             const d = masker(s.dialog);
             screenName = d && d !== 'dialog' ? d : parentScreen + ' ' + masker(last ? last.label : '');
           } else screenName = parentScreen + ' ' + masker(last ? last.label : '');
+          seenSig.add(same);
           await shoot({
             moduleName, screenName, facts, warning,
             target: masker(st.trail.join(' > ') || 'Home'),
@@ -1080,7 +1111,7 @@ async function runCapture(job, creds, outDir) {
       w.downloads = downloads.size;
       // What a later run needs to carry on from here, kept with the job for its 24 hours.
       job.walkState = pending() ? {
-        level, q1, q2, seenFp: [...seenFp], seenPat: [...seenPat], keys: [...keys], downloads: [...downloads],
+        level, q1, q2, seenFp: [...seenFp], seenPat: [...seenPat], seenSig: [...seenSig], keys: [...keys], downloads: [...downloads],
         used: [...used], hosts: [...allowedHosts],
       } : null;
       progress();

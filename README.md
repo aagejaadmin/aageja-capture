@@ -14,14 +14,16 @@ Separate from content-api so a browser's memory use never touches content produc
   - At every level: never signs out, pays, or acts as another user.
 - **Pages listed** with `buttons` or `all`: it opens what is on each listed page (buttons, tabs, dialogs) and follows no links.
 - The controls on each screen come from `discover_controls.js`, the platform-module-capture skill's script, with the additions marked in it. What may be clicked, and how screens are told apart, is in `walk.js`.
-- The run report says what it clicked, why it stopped, what it found but did not open, and what it did not click and why.
+- The run report says what it clicked, why it stopped, how many links and buttons it found but did not try, what it did not click and why, and what it opened but did not keep.
+- **Not kept (1.6.0):** a page that shows the site's error message ("An error occurred while processing your request", "Page not found", "Access denied"…, tested on its title and headings; nothing on it is opened), and a page that is the same as a screen already captured (the same title, headings, labels, controls and text on screen, numbers aside: Home and Welcome). A listed page that shows the error message goes in Not captured.
 - **Continue (1.6.0):** a walk stops at 100 screenshots (or 45 minutes). `continue_from` = the earlier run's library link: the next run signs in again, carries on with the screens the earlier run found but did not open, skips what it captured, and saves one library holding both runs. Within the earlier library's 24 hours; same environment; Pages blank; the first run's clicking choice is used. `CAPTURE_MAX_SCREENS` lowers the limit on a test machine only.
 
 ## The library
 
 - Every library is kept by this service for 24 hours (`RETENTION_HOURS`), then deleted. The links carry a 128-bit random token and stop working when the time is up.
-- **Library link:** `…/library/<token>/library.json`. Shown to the customer only as the **Continue link** when a walk left screens: it lasts 24 hours, too short for storyboards. Storyboards read the customer's own copy (next point).
+- **Library link:** `…/library/<token>/library.json`. Shown to the customer only as the **Continue link** when a walk left links and buttons not tried yet: it lasts 24 hours, too short for storyboards. Storyboards read the customer's own copy (next point).
 - **Download:** `…/library/<token>/screenshots.zip`: the images in their folders, `library.json`, `screenshot-catalogue.pdf` and a `READ ME.txt`.
+- **Library Ready (1.6.0):** the summary is short: the download and how to put it in the customer's own folder, the PDF, when the links stop, counts of what was not captured or needs checking, and the Continue link. The screenshots and the full report are in the PDF; they are on the screen only if the PDF could not be made.
 - **Catalogue (1.6.0):** `…/library/<token>/screenshots.pdf`: every screenshot with its name and description, then how the capture went. Made from a smaller JPEG copy of each screenshot.
 - **To keep the screenshots,** the customer unzips the download and uploads it to a folder anyone can open by link: a public GitHub repository, a public Amazon S3 or Google Cloud Storage bucket, or a public web folder. In `library.json` each image's link is relative to the file (`home/x.png`), so it still works there. Then they paste that folder's link (GitHub) or the link to its `library.json` (anywhere else) into the Storyboard and Lab Guide Developer.
 - Google Drive, SharePoint and OneDrive cannot be used: storyboards and slide decks cannot open images from them by link.
