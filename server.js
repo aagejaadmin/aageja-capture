@@ -278,10 +278,10 @@ const LEVEL_WORDS = {
   all: 'opened menu items, tabs, links, buttons and dialogs, and pressed buttons that change data',
 };
 
-/** "Save (3), Delete user, Send" from { label: count }. */
+/** "Save, Delete user, Send" from { label: 1 }. */
 function listOf(bucket, max = 12) {
   const e = Object.entries(bucket || {});
-  return e.slice(0, max).map(([k, n]) => mdCell(k) + (n > 1 ? ' (' + n + ')' : '')).join(', ') +
+  return e.slice(0, max).map(([k]) => mdCell(k)).join(', ') +
     (e.length > max ? ', and ' + (e.length - max) + ' more' : '');
 }
 
@@ -303,6 +303,7 @@ function walkMd(job) {
   if (w.level === 'all' && Object.keys(w.pressed).length) out.push('**Buttons pressed that change data:** ' + listOf(w.pressed, 30), '');
   const rows = [];
   if (w.level === 'links') rows.push('- **Buttons and dialogs:** not opened. Choose "Also open buttons and dialogs" to capture them.');
+  if (Object.keys(w.confirmed || {}).length) out.push('**Opened only far enough to capture the box they show, then cancelled:** ' + listOf(w.confirmed, 30) + '. Nothing these buttons sent reached the site.', '');
   if (w.level !== 'all' && Object.keys(w.change).length) rows.push('- **Would change data, so not pressed:** ' + listOf(w.change) + '. Choose "Also press buttons that change data" to include them.');
   if (Object.keys(w.never).length) rows.push('- **Never pressed:** ' + listOf(w.never) + '. Signing out, paying and acting as another user are never done.');
   if (Object.keys(w.window).length) rows.push('- **Open a new window, so not followed:** ' + listOf(w.window));
@@ -378,6 +379,7 @@ function publicJob(job, req) {
     blocked: job.blocked,
     background: job.background,
     library: job.library || null,
+    walk: job.walk ? { level: job.walk.level, mode: job.walk.mode, stopped: job.walk.stopped, tried: job.walk.tried, unchanged: job.walk.nochange, not_reached: job.walk.left, failed: job.walk.failed } : null,
   };
 }
 

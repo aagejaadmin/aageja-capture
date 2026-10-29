@@ -1,14 +1,20 @@
 'use strict';
 /**
  * The walk: what the capture may click, and how it tells one screen from
- * another. Pure functions and functions that run inside the page; the walk
- * itself runs in capture.js.
+ * another. The controls on a screen come from discover_controls.js (the
+ * platform-module-capture skill's script); the walk itself runs in
+ * capture.js.
  *
  * Three levels, chosen by the person running the capture:
  *   links    menu items, tabs and links. Navigation menus are opened to find
  *            their links, but an open menu is not a screenshot.
  *   buttons  also buttons, ⋯ menus, dropdowns, accordions and wizard steps.
  *            Each dialog and form is captured, then left without saving.
+ *            A button that changes data (Delete, Send, ...) is clicked with
+ *            every request that is not a plain read refused: if it opens an
+ *            "Are you sure?" box, that is captured and Cancel pressed
+ *            (the skill's Constraint 5); if it acts at once, nothing reaches
+ *            the site.
  *   all      also buttons that change data (Save, Submit, Delete, Send and
  *            similar), pressed last, after every other screen is captured.
  * At every level: never signs out, never pays, never acts as another user.
@@ -58,7 +64,8 @@ function addressWords(href) {
 }
 
 const ID_SEG = /^(\d+|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|[0-9a-f]{12,}|(?=.*\d)[A-Za-z0-9_-]{16,})$/i;
-const ID_VAL = /^(\d{2,}|[0-9a-f]{8}-[0-9a-f-]{27}|[0-9a-f]{12,}|(?=.*\d)[A-Za-z0-9_-]{16,}|.*\d{4,}.*)$/i;
+const ID_VAL = /^(\d+|[0-9a-f]{8}-[0-9a-f-]{27}|[0-9a-f]{12,}|(?=.*\d)[A-Za-z0-9_-]{16,}|.*\d{4,}.*)$/i;
+const ID_KEY = /(^id$|_id$|Id$|^uid$|^guid$)/;
 const DROP_KEYS = /^(utm_.*|_|t|ts|time|timestamp|cache|nocache|cb|rand|r|sid|session|sessionid|token|k|key|access_token|code|state|nonce)$/i;
 
 /**
@@ -77,7 +84,7 @@ function urlPattern(href) {
   const q = [];
   for (const [k, v] of [...u.searchParams.entries()].sort((a, b) => a[0].localeCompare(b[0]))) {
     if (DROP_KEYS.test(k)) continue;
-    if (ID_VAL.test(v)) { hasId = true; q.push(k.toLowerCase() + '=:id'); } else q.push(k.toLowerCase() + '=' + v.toLowerCase());
+    if (ID_VAL.test(v) || (ID_KEY.test(k) && v)) { hasId = true; q.push(k.toLowerCase() + '=:id'); } else q.push(k.toLowerCase() + '=' + v.toLowerCase());
   }
   // Hash routes (#/users) pick a screen; a plain #section does not.
   const hash = /^#!?\//.test(u.hash) ? u.hash.replace(/\/\d+(?=\/|$)/g, () => { hasId = true; return '/:id'; }).toLowerCase() : '';
@@ -85,12 +92,14 @@ function urlPattern(href) {
 }
 
 /**
- * What a control does, from its name, its kind and where it is:
+ * What a control does, from its name, the class discover_controls.js gave it
+ * (tab, overflow-trigger, overflow-item, expandable, dropdown, wizard-step,
+ * row-action, toolbar, primary, form-field, nav-link) and its kind:
  *   never    never clicked (sign out, pay, act as another user)
  *   skip     clicked never (close, cancel, print, download; form fields)
  *   unnamed  a button with no name and no hint
  *   nav      a link, tab or menu item
- *   reveal   a control in the navigation that opens a menu
+ *   reveal   a control that opens the site's navigation menu
  *   open     a button that opens something (dialog, menu, form, panel)
  *   commit   changes data
  */
@@ -98,11 +107,18 @@ function classify(c) {
   const text = c.label || '';
   const words = c.href ? addressWords(c.href) : '';
   if (NEVER.test(text) || (words && NEVER.test(words))) return 'never';
-  if (c.kind === 'skip') return 'skip';
+  if (c.kind === 'skip' || c.kind === 'select' || c.kind === 'field') return 'skip';
   if (SKIP.test(text) || SKIP_ANY.test(text) || c.download) return 'skip';
-  if (c.kind === 'link' || c.kind === 'menuitem' || c.kind === 'treeitem' || c.kind === 'tab') {
+  // Links, tabs, tree items, and items of a menu in the navigation. Items of a
+  // ⋯ menu on the page are actions, judged like buttons below.
+  const navLike = c.kind === 'link' || c.kind === 'treeitem' || c.controlClass === 'tab' || c.controlClass === 'nav-link' ||
+    (c.controlClass === 'overflow-item' && c.inNav);
+  if (navLike) {
     if (c.href && FILE_EXT.test(c.href.split(/[?#]/)[0])) return 'skip';
     if (LINK_DANGER.test(text) || (words && LINK_DANGER.test(words))) return 'commit';
+    // A tab or menu item that is a button runs code, not a page load: it is
+    // judged by the button words too ("Export", "Archive").
+    if (c.kind !== 'link' && COMMIT.test(text)) return 'commit';
     if (!text) return 'unnamed';
     return 'nav';
   }
@@ -111,7 +127,7 @@ function classify(c) {
   if (!text) {
     if (HINT_COMMIT.test(c.hint)) return 'commit';
     if (navMenu) return 'reveal';
-    if (HINT_OPEN.test(c.hint)) return 'open';
+    if (HINT_OPEN.test(c.hint) || c.controlClass === 'overflow-trigger' || c.controlClass === 'expandable') return 'open';
     return 'unnamed';
   }
   if (OPENER.test(text) && !c.inDialog && c.kind !== 'submit') return 'open';
@@ -127,87 +143,6 @@ const ALLOWED = {
   buttons: new Set(['nav', 'reveal', 'open']),
   all: new Set(['nav', 'reveal', 'open', 'commit']),
 };
-
-/**
- * Runs in the page. Every control the walk might click, in the open dialog
- * only when one is open. Links in the navigation that are hidden (menus that
- * open on hover) are listed too, marked hidden: they are opened by address,
- * never clicked.
- */
-function candidatesInPage() {
-  const DLG = '[role=dialog], [role=alertdialog], dialog[open], [aria-modal="true"], .modal.show, .modal.in, .ui-dialog, .k-window, .ReactModal__Content';
-  const NAV = 'nav, header, aside, [role=navigation], [role=menubar], [role=menu], [role=tablist], [role=banner]';
-  const vis = (el) => {
-    const r = el.getBoundingClientRect();
-    if (r.width < 2 || r.height < 2) return false;
-    const s = getComputedStyle(el);
-    if (s.visibility === 'hidden' || s.display === 'none' || Number(s.opacity) < 0.05) return false;
-    if (el.closest('[aria-hidden="true"], [inert]')) return false;
-    return true;
-  };
-  const dialogs = [...document.querySelectorAll(DLG)].filter(vis);
-  const top = dialogs.length ? dialogs[dialogs.length - 1] : null;
-  const root = top || document;
-  const SEL = 'a, [role=link], button, [role=button], input[type=button], input[type=submit], input[type=checkbox], input[type=radio], [role=switch], [role=checkbox], [role=radio], [role=option], summary, [role=tab], [role=menuitem], [role=menuitemcheckbox], [role=menuitemradio], [role=treeitem], [role=combobox], [onclick], [aria-haspopup]:not(input):not(select)';
-  const idOk = (id) => /^[A-Za-z][\w-]*$/.test(id) && document.querySelectorAll('#' + CSS.escape(id)).length === 1;
-  const cssPath = (el) => {
-    const parts = [];
-    let e = el;
-    while (e && e.nodeType === 1 && e !== document.documentElement) {
-      if (e.id && idOk(e.id)) { parts.unshift('#' + CSS.escape(e.id)); break; }
-      let p = e.tagName.toLowerCase();
-      const sib = e.parentElement ? [...e.parentElement.children].filter((c) => c.tagName === e.tagName) : [];
-      if (sib.length > 1) p += ':nth-of-type(' + (sib.indexOf(e) + 1) + ')';
-      parts.unshift(p);
-      e = e.parentElement;
-    }
-    return parts.join(' > ');
-  };
-  const labelOf = (el) => {
-    let t = el.getAttribute('aria-label') || '';
-    if (!t) { const lb = el.getAttribute('aria-labelledby'); if (lb) t = lb.split(/\s+/).map((i) => (document.getElementById(i) || {}).textContent || '').join(' '); }
-    if (!t) t = el.innerText || el.textContent || '';
-    if (!t.trim()) t = el.getAttribute('title') || el.value || '';
-    if (!t.trim()) { const img = el.querySelector('img[alt]'); if (img) t = img.alt; }
-    return t.replace(/\s+/g, ' ').trim().replace(/\s*\(?\d+\)?$/, '').replace(/^[\s:•·|-]+|[\s:•·|-]+$/g, '').slice(0, 60);
-  };
-  const kindOf = (el) => {
-    const role = el.getAttribute('role');
-    const tag = el.tagName;
-    if (/^(checkbox|radio|switch|option|menuitemcheckbox|menuitemradio)$/.test(role || '') || (tag === 'INPUT' && /^(checkbox|radio)$/.test(el.type))) return 'skip';
-    if (tag === 'A' || role === 'link') return 'link';
-    if (role === 'tab' || role === 'menuitem' || role === 'treeitem' || role === 'combobox') return role;
-    if (tag === 'SUMMARY') return 'summary';
-    if ((tag === 'INPUT' || tag === 'BUTTON') && el.type === 'submit' && el.form) return 'submit';
-    return 'button';
-  };
-  const all = [...root.querySelectorAll(SEL)];
-  const set = new Set(all);
-  const out = [];
-  for (const el of all) {
-    if (el.disabled || el.getAttribute('aria-disabled') === 'true') continue;
-    // The innermost clickable thing, so a link inside a clickable row is the link.
-    if ([...el.querySelectorAll(SEL)].some((c) => set.has(c) && c !== el)) continue;
-    const tag = el.tagName;
-    const shown = vis(el);
-    const inNav = !!el.closest(NAV);
-    const rawHref = tag === 'A' ? (el.getAttribute('href') || '') : '';
-    const href = rawHref && !/^\s*(javascript:|#|mailto:|tel:)/i.test(rawHref) ? el.href : '';
-    // A hidden link is kept only when it sits in a menu (one that opens on hover).
-    if (!shown && !(href && (inNav || el.closest('[class*="menu" i], [class*="nav" i], [id*="menu" i], [id*="nav" i]')))) continue;
-    out.push({
-      sel: cssPath(el), label: labelOf(el), kind: kindOf(el), href,
-      mail: /^\s*(mailto:|tel:)/i.test(rawHref),
-      target: el.getAttribute('target') || '', download: el.hasAttribute('download'),
-      inDialog: !!top, inForm: !!el.closest('form'), inNav,
-      haspopup: el.getAttribute('aria-haspopup') || '', expanded: el.getAttribute('aria-expanded'),
-      hint: ((el.className && typeof el.className === 'string' ? el.className : '') + ' ' + (el.id || '') + ' ' + (el.getAttribute('data-icon') || '')).toLowerCase().slice(0, 120),
-      hidden: !shown,
-    });
-    if (out.length >= 250) break;
-  }
-  return out;
-}
 
 /** Runs in the page. What tells this screen from others: the open dialog, the chosen tabs, the heading, and a summary of what is on screen. */
 function stateInPage() {
@@ -225,13 +160,14 @@ function stateInPage() {
     dialog = top.getAttribute('aria-label') || (lb ? txt(document.getElementById(lb.split(/\s+/)[0])) : '') ||
       txt(top.querySelector('h1, h2, h3, h4, [role=heading], .modal-title, .ui-dialog-title, legend, strong, b')) || 'dialog';
   }
-  const tabs = [...document.querySelectorAll('[role=tab][aria-selected="true"]')].filter(vis).map(txt).filter(Boolean).join('+');
-  const h1 = txt([...document.querySelectorAll('h1, [role=heading][aria-level="1"]')].filter(vis)[0]);
   const root = top || document;
+  // With a dialog open, only its own tabs tell one screen from another.
+  const tabs = [...root.querySelectorAll('[role=tab][aria-selected="true"]')].filter(vis).map(txt).filter(Boolean).join('+');
+  const h1 = txt([...document.querySelectorAll('h1, [role=heading][aria-level="1"]')].filter(vis)[0]);
   const bits = [...root.querySelectorAll('h1, h2, h3, h4, [role=heading], label, legend, th, button, a, [role=tab], [role=menuitem], [role=option], input, select, textarea, summary, details[open] > *')]
     .filter(vis).map((e) => (e.tagName + ':' + txt(e)).toLowerCase().replace(/\d+/g, '#')).filter((s) => s.length > 2);
   const sig = [...new Set(bits)].sort().join('|');
   return { dialog, tabs, h1, sig };
 }
 
-module.exports = { NEVER, LINK_DANGER, COMMIT, OPENER, SKIP, classify, ALLOWED, urlPattern, addressWords, norm, candidatesInPage, stateInPage, FILE_EXT };
+module.exports = { NEVER, LINK_DANGER, COMMIT, OPENER, SKIP, classify, ALLOWED, urlPattern, addressWords, norm, stateInPage, FILE_EXT };

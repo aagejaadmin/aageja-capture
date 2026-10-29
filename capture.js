@@ -28,6 +28,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const png = require('./png-meta');
 const W = require('./walk');
+const { discoverControls } = require('./discover_controls');
 
 const DANGER = /\b(delete|remove|deactivate|disable|archive|purge|reset|revoke|terminate|sign\s?out|sign\s?off|log\s?out|log\s?off|logout|logoff|signout|save|submit|approve|reject|decline|send|publish|unpublish|pay|purchase|buy|checkout|import|upload|assign|unassign|enrol+|register|request|launch|confirm)\b/i;
 const PASS_SEL = 'input[type="password"]';
@@ -529,7 +530,10 @@ async function runCapture(job, creds, outDir) {
   // itself is signing in, opening a page or clicking. acceptDialogs: true
   // only while the "all" level presses a button that changes data, so the
   // site's own "Are you sure?" box is answered yes.
-  const state = { guard: false, acting: false, acceptDialogs: false };
+  // probe: true while the buttons level clicks a data-changing button to see
+  // its "Are you sure?" box; every request but a plain read is then refused,
+  // and so is loading another page.
+  const state = { guard: false, acting: false, acceptDialogs: false, probe: false };
   let page = null;
   let debugN = 0;
 
@@ -593,6 +597,11 @@ async function runCapture(job, creds, outDir) {
       if (!ALLOW_LOCAL && /^https?:/i.test(r.url()) && isInternalName(host)) {
         job.blocked_requests++;
         if (job.blocked.length < 20) job.blocked.push(m + ' ' + cleanSourceUrl(r.url()) + ' (not a public address)');
+        return route.abort('blockedbyclient');
+      }
+      if (state.probe && (r.isNavigationRequest() || (m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS'))) {
+        job.blocked_requests++;
+        if (job.blocked.length < 20) job.blocked.push(m + ' ' + cleanSourceUrl(r.url()) + ' (sent by a button that changes data; refused)');
         return route.abort('blockedbyclient');
       }
       const write = m === 'DELETE' || m === 'PUT' || m === 'PATCH';
@@ -764,7 +773,7 @@ async function runCapture(job, creds, outDir) {
       }
       job.walk = {
         level, mode: followLinks ? 'walk' : 'list', stopped: '', tried: 0, nochange: 0, gone: 0, failed: 0, left: 0,
-        unnamed: 0, downloads: 0, never: {}, change: {}, window: {}, site: {}, pressed: {},
+        unnamed: 0, downloads: 0, never: {}, change: {}, confirmed: {}, window: {}, site: {}, pressed: {},
       };
       await walkFrom(seeds, followLinks);
     }
@@ -779,10 +788,12 @@ async function runCapture(job, creds, outDir) {
      */
     async function walkFrom(seeds, followLinks) {
       const w = job.walk;
-      const tally = (bucket, label) => { const k = masker(label || '(no name)').slice(0, 60); bucket[k] = (bucket[k] || 0) + 1; };
+      // Each name once: the same Sign out on every page is one entry.
+      const tally = (bucket, label) => { const k = masker(label || '(no name)').slice(0, 60); bucket[k] = 1; };
       const seenFp = new Set();
       const seenPat = new Set();
       const keys = new Set();
+      const downloads = new Set();
       const q1 = [];
       const q2 = [];
       for (const s of seeds) q1.push(s);
@@ -813,7 +824,7 @@ async function runCapture(job, creds, outDir) {
         const frames = page.frames();
         const ordered = frames.filter((f) => framePat(f) === a.frame).concat(frames.filter((f) => framePat(f) !== a.frame));
         for (const f of ordered) {
-          const cands = await f.evaluate(W.candidatesInPage).catch(() => []);
+          const cands = ((await f.evaluate(discoverControls, { dialogOnly: true }).catch(() => null)) || { controls: [] }).controls;
           const c = cands.find((x) => !x.hidden && x.sel === a.sel && x.label === a.label) ||
             cands.find((x) => !x.hidden && x.label === a.label && x.kind === a.kind);
           if (c) return { c, loc: f.locator(c.sel).first() };
@@ -851,9 +862,13 @@ async function runCapture(job, creds, outDir) {
               // The last check before every click: the control on the page now
               // must pass this level's rules by its own name.
               const cls = W.classify(found.c);
-              if (cls === 'never' || !W.ALLOWED[level].has(cls)) throw new Skip('changed', a.label);
+              const probing = st.probe && i === st.actions.length - 1 && cls === 'commit';
+              if (cls === 'never' || (!W.ALLOWED[level].has(cls) && !probing)) throw new Skip('changed', a.label);
               await found.loc.scrollIntoViewIfNeeded({ timeout: 3000 }).catch(() => {});
               await found.loc.hover({ timeout: 2000 }).catch(() => {});
+              // A probe stays on until the visit ends: nothing the button
+              // starts reaches the site, before or after its box is captured.
+              if (probing) state.probe = true;
               state.acceptDialogs = pressing && level === 'all';
               try { await safeClick(found.loc); await settle(page); } finally { state.acceptDialogs = false; }
             }
@@ -864,8 +879,45 @@ async function runCapture(job, creds, outDir) {
         });
       };
 
+      /**
+       * The buttons level's probe of a data-changing button (the skill's
+       * Constraint 5): if it opened an "Are you sure?" box, capture the box
+       * and press Cancel. Nothing it sent reached the site.
+       */
+      const probeResult = async (st) => {
+        const last = st.actions[st.actions.length - 1];
+        await waitForQuiet(page, 5000);
+        const s = await stateOf();
+        const pat = W.urlPattern(page.url());
+        const raw = pat.pattern + (s.dialog ? '|dlg:' + W.norm(s.dialog) : '') + (s.tabs ? '|tab:' + W.norm(s.tabs) : '');
+        if (!s.dialog || (st.parent && raw === st.parent.raw.replace(/\|h1:.*$/, ''))) { tally(w.change, last.label); return; }
+        const fp = raw + '>' + W.norm(last.label);
+        if (seenFp.has(fp)) return;
+        seenFp.add(fp);
+        await page.mouse.move(size.width - 2, size.height - 2).catch(() => {});
+        job.masked += await maskPage(page, words);
+        const facts = await pageFacts(page, { dialog: true });
+        const parentScreen = st.parent ? st.parent.screen : 'Home';
+        const d = masker(s.dialog);
+        await shoot({
+          moduleName: st.parent ? st.parent.module : 'Home',
+          screenName: d && d !== 'dialog' ? d : parentScreen + ' ' + masker(last.label) + ' confirmation',
+          facts, warning: '', target: masker(st.trail.join(' > ')),
+          reached: masker(st.trail.join(' > ')) + ' (the box was then cancelled)',
+        });
+        tally(w.confirmed, last.label);
+        progress();
+        // Cancel, never confirm.
+        const found = (await page.mainFrame().evaluate(discoverControls, { dialogOnly: true }).catch(() => null)) || { controls: [] };
+        const cancel = found.controls.find((c) => /^(cancel|no|close|dismiss|keep|go back|×|✕|✖|x)$/i.test(c.label || ''));
+        if (cancel) await safeClick(page.locator(cancel.sel).first()).catch(() => {});
+        else await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(500);
+      };
+
       const visit = async (st) => {
         await reach(st);
+        if (st.probe) return probeResult(st);
         const last = st.actions[st.actions.length - 1];
         if (st.commit && last) tally(w.pressed, last.label);
         if (st.commit && !last) tally(w.pressed, st.trail[st.trail.length - 1]);
@@ -891,7 +943,8 @@ async function runCapture(job, creds, outDir) {
         const cands = [];
         for (const f of page.frames()) {
           const fpat = framePat(f);
-          for (const c of await f.evaluate(W.candidatesInPage).catch(() => [])) cands.push({ ...c, frame: fpat, cls: W.classify(c) });
+          const found = (await f.evaluate(discoverControls, { dialogOnly: true }).catch(() => null)) || { controls: [] };
+          for (const c of found.controls) cands.push({ ...c, frame: fpat, cls: W.classify(c) });
         }
 
         const navigated = !st.parent || pat.pattern !== st.parent.pattern;
@@ -903,13 +956,14 @@ async function runCapture(job, creds, outDir) {
           if (facts.body_text < 40 && !s.dialog) { await page.waitForTimeout(4000); await settle(page); }
           job.masked += await maskPage(page, words);
           facts = await pageFacts(page, { dialog: !!s.dialog });
-          const warning = facts.body_text < 40 ? 'The page looked empty when it was captured. Check this image.'
+          // A dialog is small by nature: only a page is checked for looking empty.
+          const warning = facts.body_text < 40 && !s.dialog ? 'The page looked empty when it was captured. Check this image.'
             : stillLoading ? 'The page was still loading after 12 seconds when it was captured. Check this image.' : '';
           const urlPath = new URL(page.url()).pathname.split('/').filter(Boolean);
           const parentScreen = st.parent ? st.parent.screen : 'Home';
           if (st.home) { moduleName = 'Home'; screenName = 'Home'; }
           else if (navigated && !s.dialog) {
-            moduleName = facts.active_nav || masker(st.trail[0] || '') || urlPath[0] || 'general';
+            moduleName = facts.active_nav || masker((st.names || st.trail)[0] || '') || urlPath[0] || 'general';
             screenName = pat.hasId ? parentScreen + ' detail'
               : (facts.h1 || titleName(facts.title) || masker(st.trail[st.trail.length - 1] || '') || 'page');
           } else if (s.dialog) {
@@ -931,10 +985,14 @@ async function runCapture(job, creds, outDir) {
         for (const c of cands) {
           const cls = c.cls;
           if (cls === 'never') { if (!c.hidden) tally(w.never, c.label); continue; }
-          if (cls === 'skip') { if (c.download || (c.href && W.FILE_EXT.test(c.href.split(/[?#]/)[0]))) w.downloads++; continue; }
+          if (cls === 'skip') { if (c.download || (c.href && W.FILE_EXT.test(c.href.split(/[?#]/)[0]))) downloads.add(c.href || c.label); continue; }
           if (cls === 'unnamed') { if (!c.hidden) w.unnamed++; continue; }
-          if (!W.ALLOWED[level].has(cls)) { if (cls === 'commit' && !c.hidden) tally(w.change, c.label); continue; }
-          const commit = cls === 'commit';
+          // The buttons level probes a data-changing button for its "Are you
+          // sure?" box instead of skipping it. Never a link: following one is
+          // a page load, and that is the change.
+          const probe = level === 'buttons' && cls === 'commit' && c.kind !== 'link' && !c.href && !c.hidden && deep;
+          if (!W.ALLOWED[level].has(cls) && !probe) { if (cls === 'commit' && !c.hidden) tally(w.change, c.label); continue; }
+          const commit = cls === 'commit' && !probe;
           const phase = commit || st.phase === 2 ? 2 : 1;
           const q = phase === 2 ? q2 : q1;
           if (c.kind === 'link' && c.href) {
@@ -946,17 +1004,20 @@ async function runCapture(job, creds, outDir) {
             const p = W.urlPattern(c.href).pattern;
             if (seenPat.has(p)) continue;
             seenPat.add(p);
-            q.push({ base: c.href, actions: [], trail: st.trail.concat(c.label || ''), parent: node, phase, commit, capture: true });
+            q.push({ base: c.href, actions: [], trail: st.trail.concat(c.label || ''), names: (st.names || st.trail).concat(c.label || ''), parent: node, phase, commit, capture: true });
           } else {
             if (c.hidden || !deep) continue;
             if (c.kind === 'link' && !followLinks) continue;
-            const keyBase = s.dialog || /^(next|continue)\b/i.test(c.label) ? fp : raw;
+            // A control in the site's navigation (a menu button in the header)
+            // is the same on every page: opened once for the whole walk.
+            const keyBase = (cls === 'reveal' || c.inNav) && !s.dialog ? 'site-navigation' : s.dialog || /^(next|continue)\b/i.test(c.label) ? fp : raw;
             const key = keyBase + '|' + c.kind + ':' + W.norm(c.label || c.hint);
             if (keys.has(key)) continue;
             keys.add(key);
             q.push({
               base: st.base, actions: st.actions.concat({ frame: c.frame, sel: c.sel, label: c.label, kind: c.kind }),
-              trail: st.trail.concat(c.label || 'unnamed'), parent: node, phase, commit,
+              trail: st.trail.concat(c.label || 'unnamed'), names: cls === 'reveal' ? (st.names || st.trail) : (st.names || st.trail).concat(c.label || 'unnamed'),
+              parent: node, phase, commit, probe,
               capture: !(cls === 'reveal' && level === 'links'),
             });
           }
@@ -974,6 +1035,7 @@ async function runCapture(job, creds, outDir) {
         try {
           await visit(st);
         } catch (e) {
+          state.probe = false;
           if (e instanceof Skip) {
             if (e.why === 'window') tally(w.window, e.label);
             else if (e.why === 'site') tally(w.site, e.label);
@@ -994,8 +1056,10 @@ async function runCapture(job, creds, outDir) {
             }
           }
         }
+        state.probe = false;
       }
       w.left = pending();
+      w.downloads = downloads.size;
       progress();
       job.progress.current = '';
     }

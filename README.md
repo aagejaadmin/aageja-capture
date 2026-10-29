@@ -1,8 +1,20 @@
 # AaGeJa Capture Service
 
-Server side of the **Screenshot Library Builder** agent. Signs in to a product's web environment, captures a list of pages at one exact size, masks email addresses and phone numbers, and keeps the library (images with embedded metadata, `library.json`, and a zip of everything) for 24 hours on links anyone with the link can open.
+Server side of the **Screenshot Library Builder** agent. Signs in to a product's web environment, walks through it (or captures a list of pages) at one exact size, masks email addresses and phone numbers, and keeps the library (images with embedded metadata, `library.json`, and a zip of everything) for 24 hours on links anyone with the link can open.
 
 Separate from content-api so a browser's memory use never touches content production.
+
+## The walk (1.5.0)
+
+- **No pages listed:** the service walks the product from the page after sign-in, nearest screens first, up to 100 screenshots and 45 minutes. The same screen for another record (`/users/123`, `/users/456`, `?id=5`) is captured once.
+- **`click_level`** says what it clicks:
+  - `links` (default): menu items, tabs and links. Navigation menus (☰, "Admin ▾", menus that open on hover) are opened to find their links.
+  - `buttons`: also buttons, ⋯ menus, dropdowns, accordions and wizard steps. Each dialog and form is captured, then left without saving. A button that changes data (Delete, Send, Save…) is clicked with every request but a plain read refused, and page loads refused: if it opens an "Are you sure?" box, the box is captured and Cancel pressed; if it acts at once, nothing reaches the site.
+  - `all`: also presses buttons that change data, after every other screen is captured. The browser then refuses nothing but addresses off the public internet, and answers the site's own "Are you sure?" yes.
+  - At every level: never signs out, pays, or acts as another user.
+- **Pages listed** with `buttons` or `all`: it opens what is on each listed page (buttons, tabs, dialogs) and follows no links.
+- The controls on each screen come from `discover_controls.js`, the platform-module-capture skill's script, with the additions marked in it. What may be clicked, and how screens are told apart, is in `walk.js`.
+- The run report says what it clicked, why it stopped, what it found but did not open, and what it did not click and why.
 
 ## The library
 
@@ -29,19 +41,19 @@ Separate from content-api so a browser's memory use never touches content produc
 | Route | Key | What it does |
 |---|---|---|
 | `GET /health` | no | Status |
-| `POST /capture/start` | yes | `{ product, client, environment_url, username, password, targets, mask_words }` → `{ job_id, status_url }`. Username and password: both, or neither for an address that opens without signing in. |
+| `POST /capture/start` | yes | `{ product, client, environment_url, username, password, targets, click_level, mask_words }` → `{ job_id, status_url }`. Username and password: both, or neither for an address that opens without signing in. `targets` blank: walk the product. `click_level`: `links` (default), `buttons` or `all`. |
 | `GET /capture/status/:id` | yes | Progress, then `screens[]`, `ai_input` (page text for the description step), `report_md`, `not_captured[]` |
 | `GET /capture/image/:id/:folder/:file` | yes | A captured image, for preview |
 | `POST /capture/finalize/:id` | yes | Body: the description step's output as plain text, or `{ descriptions }` → `{ library_url, download_url, expires, summary_md, images[] }` |
 | `GET /library/:token/library.json`, `/screenshots.zip`, `/<folder>/<file>.png` | no | The library, until it expires. Nothing else is served. |
 
-- `targets` is one page per line: a full web address, a path starting with `/`, or a menu path such as `Admin > Users`.
+- `targets` is one page per line: a full web address, a path starting with `/`, or a menu path such as `Admin > Users`. Blank: the walk.
 
 ## Rules the code enforces
 
 - **Credentials:** optional (an address that opens without signing in needs none). When given, they arrive with each run, are used in the browser only, and are never written, logged or returned. A key in the address's query string is never written to the library: it records page paths only. The agent tells the person running it that the password stays in MindStudio's run history and to change it after the capture.
-- **What it does on the site:**
-  - It only opens pages and clicks menu items. Menu steps and web addresses containing words that change data (delete, save, submit, sign out and similar) are refused before anything is clicked.
+- **What it does on the site** depends on `click_level` (The walk, above). Below `all`:
+  - Menu steps, links and web addresses containing words that change data (delete, save, submit, sign out and similar) are refused before anything is clicked.
   - After sign-in, the browser refuses DELETE, PUT and PATCH requests, and form posts that load a new page when the service did not start them.
   - Pages still make their own background requests while loading, as they do for anyone viewing them. Every one that is not a plain read is listed in the run report.
   - New windows are closed.
