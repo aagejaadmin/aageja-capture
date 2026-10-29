@@ -43,6 +43,13 @@ const SAFE_SUBMIT = /^(search|go|find|filter|filters|apply\s+filters?|refresh|vi
 const SKIP = /^(cancel|close|dismiss|×|✕|✖|x|no\s+thanks|not\s+now|got\s+it|back|previous|prev|back\s+to\s+top|skip\s+to(\s+main)?\s+content|help|collapse\s+all)$/i;
 const SKIP_ANY = /\b(download|print)\b/i;
 
+// Browsing the same screen: sorting a table, paging through a list, moving a
+// carousel, stepping a calendar by day, week or month or picking a date. Not
+// a new screen for a storyboard, and each step finds more of the same, so
+// these are never clicked. (Cornerstone: "Name sortable column", "Next
+// Page, 2", "Play Carousel", "Previous Month", "272026-09-27", "►".)
+const BROWSE = /(sortable\s+column|\bsort(ed|ing)?\s+(by|ascending|descending)\b|\bsorted\b|^sort$|^(first|last|next|previous|prev)\s+(page|slide|month|week|day|year)\b|^page\s+\d+$|^next\s+page\b|^go\s+to\s+(page|slide)\b|\b(play|pause|stop)\s+(the\s+)?carousel\b|^(next|previous)\s+slide\b|^today$|^[►◄▶◀«»‹›<>]+$|^\d{1,3}$|\d{4}-\d{2}-\d{2}|^(january|february|march|april|may|june|july|august|september|october|november|december),?\s+\d{4}$)/i;
+
 // Class or id words that tell what a button with no name does.
 const HINT_COMMIT = /(delete|trash|remove|bin\b)/i;
 const HINT_OPEN = /(more|kebab|ellipsis|overflow|menu|dots|actions|caret|chevron|expand|toggle|dropdown|hamburger)/i;
@@ -56,11 +63,33 @@ const MORE_WORD = /(\bmore\b|\bactions\b|\boptions\b|⋯|⋮|…|▾|▼)/i;
 // kept, and nothing on it is opened. Tested on its headings and title.
 const ERROR_PAGE = /(\ban?\s+(unexpected\s+)?error\s+(has\s+)?occurred|\berror\s+occurred\s+while\s+processing|\bsomething\s+went\s+wrong|\bpage\s+(was\s+)?not\s+found|\b404\b|\binternal\s+server\s+error|\baccess\s+denied|\bnot\s+authori[sz]ed\b|\byou\s+do\s+not\s+have\s+(permission|access)|\bforbidden\b|\bsession\s+(has\s+)?(expired|timed\s+out))/i;
 
+// In a link's address, the query settings ("?Reset=true" on Cornerstone's
+// transcript link resets its filters) are only checked for these words; the
+// path and route names are checked for all of LINK_DANGER.
+const LINK_STRONG = /\b(delete|remove|deactivate|archive|purge|revoke|terminate|unassign|unpublish|publish|approve|reject|decline|send|submit)\b/i;
+const ACTION_KEY = /^(action|act|cmd|command|op|operation|do|task|method)$/i;
+
 const FILE_EXT = /\.(pdf|docx?|xlsx?|csv|pptx?|zip|rar|7z|gz|tar|mp4|mov|avi|mp3|wav|png|jpe?g|gif|svg|ics|exe|dmg|msi)$/i;
 
 const norm = (s) => String(s || '').toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
 
 function safeDecode(s) { try { return decodeURIComponent(s); } catch (_) { return s; } }
+
+/**
+ * A link's address split for the danger checks: path holds the path, route
+ * names (a query value with a /) and action settings (action=delete); query
+ * holds the other query names and values. Separators become spaces.
+ */
+function linkWords(href) {
+  // Joined words are split (LaunchCourse is Launch Course).
+  const sp = (t) => safeDecode(t).replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[-_/=&?.+]+/g, ' ');
+  try {
+    const u = new URL(href);
+    const e = [...u.searchParams.entries()];
+    const route = e.filter(([k, v]) => /\//.test(v) || ACTION_KEY.test(k)).map(([, v]) => v);
+    return { path: sp(u.pathname + ' ' + route.join(' ')), query: sp(e.map(([k, v]) => k + ' ' + v).join(' ')) };
+  } catch (_) { return { path: '', query: '' }; }
+}
 
 /** The words of an address, for the danger checks: path and query, separators as spaces. */
 function addressWords(href) {
@@ -113,13 +142,15 @@ function classify(c) {
   if (NEVER.test(text) || (words && NEVER.test(words))) return 'never';
   if (c.kind === 'skip' || c.kind === 'select' || c.kind === 'field') return 'skip';
   if (SKIP.test(text) || SKIP_ANY.test(text) || c.download) return 'skip';
+  if (BROWSE.test(text) || c.sortable) return 'browse';
   // Links, tabs, tree items, and items of a menu in the navigation. Items of a
   // ⋯ menu on the page are actions, judged like buttons below.
   const navLike = c.kind === 'link' || c.kind === 'treeitem' || c.controlClass === 'tab' || c.controlClass === 'nav-link' ||
     (c.controlClass === 'overflow-item' && c.inNav);
   if (navLike) {
     if (c.href && FILE_EXT.test(c.href.split(/[?#]/)[0])) return 'skip';
-    if (LINK_DANGER.test(text) || (words && LINK_DANGER.test(words))) return 'commit';
+    const lw = c.href ? linkWords(c.href) : { path: '', query: '' };
+    if (LINK_DANGER.test(text) || LINK_DANGER.test(lw.path) || LINK_STRONG.test(lw.query)) return 'commit';
     // A tab or menu item that is a button runs code, not a page load: it is
     // judged by the button words too ("Export", "Archive").
     if (c.kind !== 'link' && COMMIT.test(text)) return 'commit';
@@ -174,4 +205,4 @@ function stateInPage() {
   return { dialog, tabs, h1, sig };
 }
 
-module.exports = { NEVER, LINK_DANGER, COMMIT, OPENER, SKIP, ERROR_PAGE, classify, ALLOWED, urlPattern, addressWords, norm, stateInPage, FILE_EXT };
+module.exports = { NEVER, LINK_DANGER, LINK_STRONG, COMMIT, OPENER, SKIP, BROWSE, ERROR_PAGE, classify, linkWords, ALLOWED, urlPattern, addressWords, norm, stateInPage, FILE_EXT };

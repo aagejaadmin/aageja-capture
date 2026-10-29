@@ -467,7 +467,25 @@ function factsInPage(arg) {
     bodyText += tw.currentNode.nodeValue.replace(/\s+/g, '').length;
     if (bodyText > 200) break;
   }
+  // The biggest bold text in the top half of the screen, outside the site's
+  // header and menus: the screen's title where it is not marked as a heading
+  // (Cornerstone's "Expert validation" is plain 28-pixel bold text).
+  let big = '';
+  if (!top && document.body) {
+    let best = 0, bestTop = Infinity;
+    for (const el of document.body.querySelectorAll('div, span, p, strong, b, label, legend, td')) {
+      const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join(' ').replace(/\s+/g, ' ').trim();
+      if (own.length < 3 || own.length > 60 || inChrome(el) || el.closest('a, button, [role=button], [role=link], [role=tab], [role=menuitem]')) continue;
+      const r = el.getBoundingClientRect();
+      if (r.top < 0 || r.top > innerHeight / 2 || !seen(el)) continue;
+      const cs = getComputedStyle(el);
+      const size = parseFloat(cs.fontSize) || 0;
+      if (!(size >= 20 || (size >= 18 && Number(cs.fontWeight) >= 600))) continue;
+      if (size > best || (size === best && r.top < bestTop)) { best = size; bestTop = r.top; big = own; }
+    }
+  }
   return {
+    big,
     title: document.title || '',
     h1: (all(top ? 'h1, h2, h3, h4, [role=heading], .modal-title, .ui-dialog-title' : 'h1, [role=heading][aria-level="1"]').filter(seen).map(txt).filter(Boolean)[0]) || '',
     headings: uniq(all('h1, h2, h3, [role=heading]').filter(seen).map(txt)).slice(0, 12),
@@ -485,12 +503,13 @@ async function maskPage(page, words) {
 }
 
 async function pageFacts(page, opts) {
-  const merged = { title: '', h1: '', headings: [], labels: [], controls: [], active_nav: '', body_text: 0 };
+  const merged = { title: '', h1: '', big: '', headings: [], labels: [], controls: [], active_nav: '', body_text: 0 };
   for (const f of page.frames()) {
     const x = await f.evaluate(factsInPage, opts || null).catch(() => null);
     if (!x) continue;
     if (f === page.mainFrame()) merged.title = x.title;
     merged.h1 = merged.h1 || x.h1;
+    merged.big = merged.big || x.big || '';
     merged.active_nav = merged.active_nav || x.active_nav;
     merged.body_text += x.body_text || 0;
     for (const k of ['headings', 'labels', 'controls']) merged[k] = [...new Set(merged[k].concat(x[k]))];
@@ -672,6 +691,11 @@ async function runCapture(job, creds, outDir) {
     if (job.resume) for (const h of job.resume.hosts || []) allowedHosts.add(h);
     await note('signed in');
     state.guard = true;
+    // The site's own words in every tab title ("Welcome - Realize Your
+    // Potential: Cornerstone University"): a page whose title is only these
+    // is named by what it shows instead.
+    const siteWords = new Set(String(await page.title().catch(() => '')).split(/\s+[-–—|·•»]\s+|:\s+/).slice(1).map((x) => x.trim().toLowerCase()).filter(Boolean));
+    const nameFromTitle = (t) => { const n = titleName(t); return n && !siteWords.has(n.toLowerCase()) ? n : ''; };
 
     // "/" or the environment address itself means the page reached after sign-in.
     const isHome = (t) => t.raw === '/' || (t.url && t.url.replace(/\/+$/, '') === job.environment_url.replace(/\/+$/, ''));
@@ -779,7 +803,7 @@ async function runCapture(job, creds, outDir) {
         const home_ = isHome(t);
         const moduleName = home_ ? 'Home' : t.steps ? t.steps[0] : (facts.active_nav || urlPath[0] || 'general');
         const screenName = home_ ? 'Home' : t.steps ? t.steps[t.steps.length - 1]
-          : (facts.h1 || titleName(facts.title) || urlPath[urlPath.length - 1] || 'page');
+          : (facts.h1 || nameFromTitle(facts.title) || facts.big || urlPath[urlPath.length - 1] || 'page');
         await shoot({ moduleName, screenName, target: t.raw, facts, warning });
       } catch (e) {
         const refused = e.userMessage && /could change data|different site|error message/.test(e.userMessage);
@@ -815,7 +839,7 @@ async function runCapture(job, creds, outDir) {
       }
       job.walk = {
         level, mode: followLinks ? 'walk' : 'list', stopped: '', tried: 0, nochange: 0, gone: 0, failed: 0, left: 0,
-        unnamed: 0, downloads: 0, same: 0, errors: {}, never: {}, change: {}, confirmed: {}, window: {}, site: {}, pressed: {},
+        unnamed: 0, downloads: 0, same: 0, browse: 0, repeats: {}, errors: {}, never: {}, change: {}, confirmed: {}, window: {}, site: {}, pressed: {},
       };
       await walkFrom(seeds, followLinks);
     }
@@ -1035,7 +1059,7 @@ async function runCapture(job, creds, outDir) {
           else if (navigated && !s.dialog) {
             moduleName = facts.active_nav || masker((st.names || st.trail)[0] || '') || urlPath[0] || 'general';
             // Every page is named by its own heading, as the page list names one.
-            screenName = facts.h1 || titleName(facts.title) || masker(st.trail[st.trail.length - 1] || '') || 'page';
+            screenName = facts.h1 || nameFromTitle(facts.title) || masker(facts.big) || masker(st.trail[st.trail.length - 1] || '') || 'page';
           } else if (s.dialog) {
             const d = masker(s.dialog);
             screenName = d && d !== 'dialog' ? d : parentScreen + ' ' + masker(last ? last.label : '');
@@ -1053,11 +1077,38 @@ async function runCapture(job, creds, outDir) {
         // What to open next: navigation first, then tabs, other links, then buttons.
         const rank = (c) => (c.cls === 'commit' ? 9 : c.kind === 'link' && c.inNav ? 0 : c.kind === 'tab' ? 1 : c.kind === 'link' || c.kind === 'menuitem' ? 2 : c.cls === 'reveal' ? 3 : 4);
         cands.sort((a, b) => rank(a) - rank(b));
+        // The same button on each item of a list or table: the first one stands
+        // for the rest. Same means a label of the form "word: item" with the
+        // same word ("Actions: Office Safety Test", "Follow: 5G Awareness"),
+        // or the same place in the page, row aside, and the same first word
+        // ("Approve Dan Jones" on each row). Buttons with the very same label
+        // are already opened once. Links are not grouped: their addresses are.
+        const firstWord = (c) => W.norm(c.label).split(/[\s:]+/)[0] || '';
+        const prefix = (c) => { const m = /^([^:]{2,30}):\s+\S/.exec(String(c.label || '')); return m ? W.norm(m[1]) : ''; };
+        const shapeOf = (c) => prefix(c) ? 'item|' + c.frame + '|' + c.kind + '|' + prefix(c)
+          : c.frame + '|' + String(c.sel || '').replace(/:nth-of-type\(\d+\)/g, '').replace(/\d+/g, '#') + '|' + c.kind + '|' + firstWord(c);
+        const listed = (c) => c.kind !== 'link' && !c.inNav && !c.hidden && !!c.label;
+        const shapeCount = new Map();
+        for (const c of cands) if (listed(c)) shapeCount.set(shapeOf(c), (shapeCount.get(shapeOf(c)) || 0) + 1);
+        const grouped = (c) => listed(c) && shapeCount.get(shapeOf(c)) >= (prefix(c) ? 2 : 3);
+        const shapeOpened = new Set();
+        // A picture that links to the same place as a named link (a course's
+        // picture beside its title) is not a button with no name.
+        const namedHrefs = new Set(cands.filter((c) => c.label && c.href).map((c) => c.href));
         for (const c of cands) {
           const cls = c.cls;
           if (cls === 'never') { if (!c.hidden) tally(w.never, c.label); continue; }
           if (cls === 'skip') { if (c.download || (c.href && W.FILE_EXT.test(c.href.split(/[?#]/)[0]))) downloads.add(c.href || c.label); continue; }
-          if (cls === 'unnamed') { if (!c.hidden) w.unnamed++; continue; }
+          if (cls === 'browse') { if (!c.hidden) w.browse++; continue; }
+          if (cls === 'unnamed') { if (!c.hidden && !(c.href && namedHrefs.has(c.href))) w.unnamed++; continue; }
+          if (grouped(c)) {
+            if (shapeOpened.has(shapeOf(c))) {
+              const k = masker(String(c.label).split(/[\s:]+/)[0]).slice(0, 40) || 'button';
+              w.repeats[k] = (w.repeats[k] || 0) + 1;
+              continue;
+            }
+            shapeOpened.add(shapeOf(c));
+          }
           // The buttons level probes a data-changing button for its "Are you
           // sure?" box instead of skipping it. Never a link: following one is
           // a page load, and that is the change.

@@ -344,6 +344,9 @@ function walkMd(job) {
   if (Object.keys(w.never).length) rows.push('- **Never pressed:** ' + listOf(w.never) + '. Signing out, paying and acting as another user are never done.');
   if (Object.keys(w.window).length) rows.push('- **Open a new window, so not followed:** ' + listOf(w.window));
   if (Object.keys(w.site).length) rows.push('- **On another site, so not followed:** ' + listOf(w.site));
+  if (w.browse) rows.push('- **Sorting, paging, carousel and calendar controls, not clicked (they show the same screen):** ' + w.browse);
+  const reps = Object.entries(w.repeats || {}).sort((a, b) => b[1] - a[1]);
+  if (reps.length) rows.push('- **The same button on each item of a list, opened for the first item only:** ' + reps.slice(0, 12).map(([k, n]) => mdCell(k) + ' (' + n + ' more)').join(', ') + (reps.length > 12 ? ', and ' + (reps.length - 12) + ' more' : ''));
   if (w.unnamed) rows.push('- **Buttons with no name, so not clicked:** ' + w.unnamed);
   if (w.downloads) rows.push('- **Downloads, not opened:** ' + w.downloads);
   if (w.gone) rows.push('- **Could not be reached again:** ' + w.gone + ' (the page had changed since the control was found).');
@@ -538,7 +541,7 @@ async function start(req, res) {
     // This run's library starts as a copy of the earlier one, so it does not
     // depend on the earlier run's links staying up.
     job.resume = JSON.parse(JSON.stringify(earlier.walkState));
-    job.prior = { rows: earlier.rows.map((r) => ({ ...r })), not_captured: (earlier.library_not_captured || []).slice() };
+    job.prior = { rows: earlier.rows.map((r) => ({ ...r })), not_captured: (earlier.library_not_captured || []).slice(), reports: (earlier.reports || []).slice() };
     job.runs = (earlier.runs || 1) + 1;
     const from = path.join(WORK_DIR, earlier.id);
     const to = path.join(WORK_DIR, id);
@@ -639,6 +642,17 @@ async function finalize(req, res, job) {
     '3. In the Storyboard and Lab Guide Developer, paste the link into the Screenshot Library URL field: for GitHub, the link to the folder; for anywhere else, the link to library.json in it. Use the same link for every storyboard and lab guide that needs these screenshots.',
     '',
   ].join('\r\n'), 'utf8');
+  // How the capture went, for every run in this library: the PDF holds all of
+  // them, and the screen's counts are totals.
+  const w0 = job.walk;
+  const thisRun = {
+    run: job.runs || 1, md: reportMd(job),
+    check: job.screens.filter((x) => x.warning).length,
+    errors: w0 ? Object.keys(w0.errors || {}).length : 0,
+  };
+  const reports = (prior.reports || []).concat([thisRun]);
+  job.reports = reports;
+  const pdfReport = reports.length > 1 ? reports.map((r) => '**Run ' + r.run + '**\n\n' + r.md).join('\n\n') : thisRun.md;
   let pdf = null;
   try {
     for (const f of files) fs.writeFileSync(path.join(dir, ...f.name.split('/')), f.content);
@@ -648,7 +662,7 @@ async function finalize(req, res, job) {
       const out = path.join(dir, 'screenshots.pdf');
       await buildCatalogue({
         dir, rows, product: job.product, client: job.client, captured: date,
-        size: job.size.width + ' × ' + job.size.height, reportMd: reportMd(job), outFile: out,
+        size: job.size.width + ' × ' + job.size.height, reportMd: pdfReport, outFile: out,
       });
       pdf = fs.readFileSync(out);
     } catch (e) {
@@ -684,24 +698,24 @@ async function finalize(req, res, job) {
   // PDF, when the links stop, a short outcome, and the Continue link when a
   // walk left links and buttons to try. The screenshots and the full report
   // are in the PDF; the table is shown only if the PDF could not be made.
-  const toCheck = job.screens.filter((x) => x.warning).length;
-  const w = job.walk;
-  const errorPages = w ? Object.keys(w.errors || {}).length : 0;
+  const toCheck = reports.reduce((n, r) => n + (r.check || 0), 0);
+  const errorPages = reports.reduce((n, r) => n + (r.errors || 0), 0);
+  const allRuns = reports.length > 1 ? ' (all runs)' : '';
   const md = [
     '**Download your screenshots:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + ')' +
       (earlier ? ': all ' + rows.length + ', from this run and the earlier run' + (job.runs > 2 ? 's' : '') + '. Keep only this download: it replaces the earlier one.' : ''),
     '',
     'To use them in storyboards and lab guides, unzip the download and upload everything, keeping its folders, to a folder anyone can open by link: a public GitHub repository, or a public Amazon S3 or Google Cloud Storage bucket (not Google Drive, SharePoint or OneDrive: their links do not open the images). Then paste that folder\'s link (on GitHub) or the link to library.json in it (anywhere else) into the **Screenshot Library URL** field of the **Storyboard and Lab Guide Developer**, for every storyboard and lab guide that needs these screenshots. The READ ME in the download says the same.',
     '',
-    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): ' + (earlier ? 'all ' + rows.length + ' screenshots, from every run,' : 'every screenshot') + ' with its name and description, then how the capture went. It is also in the download.', ''] : []),
+    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): ' + (earlier ? 'all ' + rows.length + ' screenshots, from every run, each' : 'every screenshot') + ' with its name and description, then how the capture went. It is also in the download.', ''] : []),
     '**These download links work until ' + whenUtc(job.expires) + '.** Download the files before then.',
     '',
     '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', each ' + job.size.width + ' × ' + job.size.height +
       (earlier ? ': ' + n + ' new in this run, and ' + earlier + ' from the earlier run' + (job.runs > 2 ? 's' : '') + '. The download has all of them.' : '.'),
   ];
-  if (job.not_captured.length) md.push('', '**Not captured:** ' + job.not_captured.length + ' page' + (job.not_captured.length === 1 ? '' : 's') + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
-  if (errorPages) md.push('', '**Showed the site\'s error message, so not kept:** ' + errorPages + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
-  if (toCheck) md.push('', '**Check:** ' + toCheck + ' screenshot' + (toCheck === 1 ? '' : 's') + ' that ' + (toCheck === 1 ? 'was' : 'were') + ' still loading or looked empty' + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
+  if (notCaptured.length) md.push('', '**Not captured' + allRuns + ':** ' + notCaptured.length + ' page' + (notCaptured.length === 1 ? '' : 's') + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
+  if (errorPages) md.push('', '**Showed the site\'s error message, so not kept' + allRuns + ':** ' + errorPages + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
+  if (toCheck) md.push('', '**Check' + allRuns + ':** ' + toCheck + ' screenshot' + (toCheck === 1 ? '' : 's') + ' that ' + (toCheck === 1 ? 'was' : 'were') + ' still loading or looked empty' + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
   if (missing) md.push('', '_' + missing + ' description' + (missing === 1 ? ' was' : 's were') + ' not written, so ' + (missing === 1 ? 'it uses' : 'they use') + ' the screen name._');
   md.push('');
   if (remaining) {
@@ -715,8 +729,7 @@ async function finalize(req, res, job) {
     md.push(earlier ? '**New in this run**' : '**Screenshots**', '', '| Screen | Description |', '|---|---|');
     job.library_rows.slice(earlier).forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
     md.push('');
-    const rep = reportMd(job);
-    if (rep) md.push(rep);
+    if (pdfReport) md.push(pdfReport);
   }
   job.library.summary_md = md.join('\n');
   send(res, 200, { ...job.library, images: job.library_rows, not_captured: notCaptured });

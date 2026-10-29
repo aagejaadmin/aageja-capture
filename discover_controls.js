@@ -19,6 +19,9 @@
  *   4. With opts.dialogOnly, when a dialog is open only the controls inside
  *      it are listed: the page behind a dialog cannot be clicked.
  *   5. The selector also takes [role=link], [role=treeitem] and [onclick].
+ *   6. Every control also carries sortable: true for a table's sort control
+ *      (inside an [aria-sort] header, or a link whose script or address sorts,
+ *      such as javascript:__doPostBack('…','Sort$Title')).
  * Everything else (the classes, the locator order, breadth, counts) is the
  * skill's own.
  *
@@ -117,6 +120,7 @@ function discoverControls(opts) {
       hint: ((typeof el.className === "string" ? el.className : "") + " " + (el.id || "") + " " + (el.getAttribute("data-icon") || "")).toLowerCase().slice(0, 120),
       download: el.hasAttribute("download"),
       hidden,
+      sortable: !!el.closest("[aria-sort]") || /(^|[^a-z])sort/i.test(raw) || /(^|[-_\s])sort(able|ing)?([-_\s]|$)/i.test(typeof el.className === "string" ? el.className : ""), // ADDITION 6
     };
   };
   // ── ADDITION 4: inside an open dialog, only the dialog ──
