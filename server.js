@@ -1,6 +1,27 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.6.0 (October 2026)
+ * AaGeJa Capture Service — v1.6.1 (October 2026)
+ *
+ * v1.6.1 — fixes from the first Cornerstone runs
+ *   - Links: a link's query settings are checked only for strong words
+ *     (delete, remove, approve, send, submit...); its path and route names
+ *     for every data-changing word. Joined words in addresses are split
+ *     (LaunchCourse). Cornerstone's View Transcript (…?Reset=true) is opened.
+ *   - The same button on each item of a list or table ("Actions: <course>",
+ *     "Follow: <playlist>", "Approve <name>") is opened for the first item
+ *     only; the report lists the rest.
+ *   - Sorting, paging, carousel and calendar controls are not clicked: they
+ *     show the same screen. discover_controls.js marks a table's sort control.
+ *   - Names: a heading hidden for screen readers is not used; a tab title that
+ *     is only the site's tagline is not used; then the biggest bold text near
+ *     the top is. A site name after " · ", " • " or " » " is dropped.
+ *   - "Still loading" is reported only while a loading sign (a spinner, a busy
+ *     region) is on screen; a carousel or a live feed is not loading.
+ *   - A picture linking to the same place as a named link is not counted as a
+ *     button with no name.
+ *   - Continue: the combined PDF has the report of every run, and the Library
+ *     Ready counts are for all runs. The download and PDF lines say they hold
+ *     every run's screenshots and that this download replaces the earlier one.
  *
  * v1.6.0 — continue a walk, a PDF catalogue, plainer links
  *   - continue_from (new): the link of an earlier run's library, from a walk
@@ -202,7 +223,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.6.0';
+const VERSION = '1.6.1';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
