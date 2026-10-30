@@ -328,7 +328,8 @@ async function waitForQuiet(page, maxMs = 12000) {
     const WORD = /(^|[-_])(skeleton|shimmer|spinner|loader|loading|preloader)([-_]|$)/i;
     const DONE = /(^|[-_])(done|complete|completed|loaded|finished|hidden|hide)([-_]|$)/i;
     const loaderClass = (el) => {
-      if (el.matches('[aria-busy="true"], [role=progressbar]')) return true;
+      // A progress bar showing a value (a course's "0%") is not loading; one with no value is.
+      if (el.matches('[aria-busy="true"]') || (el.matches('[role=progressbar]') && !el.hasAttribute('aria-valuenow'))) return true;
       const tokens = (el.getAttribute('class') || '').split(/\s+/);
       return tokens.some((t) => WORD.test(t)) && !tokens.some((t) => DONE.test(t));
     };
@@ -740,7 +741,7 @@ async function runCapture(job, creds, outDir) {
       used.add(folder + '/' + filename);
       fs.mkdirSync(path.join(outDir, folder), { recursive: true });
       fs.writeFileSync(path.join(outDir, folder, filename), buf);
-      // A smaller copy for the PDF catalogue only; never in the zip or served.
+      // A smaller copy for the PDF catalog only; never in the zip or served.
       try {
         const jpg = await page.screenshot({ type: 'jpeg', quality: 75, fullPage: false, animations: 'disabled', caret: 'hide' });
         fs.mkdirSync(path.join(outDir, '_thumbs', folder), { recursive: true });
@@ -976,7 +977,7 @@ async function runCapture(job, creds, outDir) {
           moduleName: st.parent ? st.parent.module : 'Home',
           screenName: d && d !== 'dialog' ? d : parentScreen + ' ' + masker(last.label) + ' confirmation',
           facts, warning: '', target: masker(st.trail.join(' > ')),
-          reached: masker(st.trail.join(' > ')) + ' (the box was then cancelled)',
+          reached: masker(st.trail.join(' > ')) + ' (the box was then canceled)',
         });
         tally(w.confirmed, last.label);
         progress();

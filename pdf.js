@@ -1,6 +1,6 @@
 'use strict';
 /**
- * The screenshot catalogue: one PDF with every screenshot in the library,
+ * The screenshot catalog: one PDF with every screenshot in the library,
  * its name and its description, then how the capture went. Made with the
  * browser the service already runs (Chromium prints to PDF); nothing leaves
  * the machine: the page is a local file and every network request is refused.
@@ -65,7 +65,7 @@ async function buildCatalogue({ dir, rows, product, client, captured, size, repo
 ${rows.map((r, i) => `<div class="shot"><h2>${i + 1}. ${esc(label(r))}</h2><div class="file">${esc(r.folder + '/' + r.filename)}</div><p>${esc(r.description)}</p><img src="${esc(img(r).split(path.sep).map(encodeURIComponent).join('/'))}"></div>`).join('\n')}
 ${reportMd ? `<div class="report"><h1>How the capture went</h1>${mdToHtml(reportMd)}</div>` : ''}
 </body></html>`;
-  const htmlFile = path.join(dir, '_catalogue.html');
+  const htmlFile = path.join(dir, '_catalog.html');
   fs.writeFileSync(htmlFile, html);
   const browser = await chromium.launch({ args: ['--disable-dev-shm-usage'] });
   try {

@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.6.1 (October 2026)
+ * AaGeJa Capture Service — v1.6.2 (October 2026)
+ *
+ * v1.6.2 — US spelling; a progress bar is not loading
+ *   - US spelling in everything a user reads: "catalog" (the PDF in the zip
+ *     is screenshot-catalog.pdf), "canceled".
+ *   - A progress bar that shows a value (a course's "0%") is not a loading
+ *     sign; only one with no value (still working) is.
  *
  * v1.6.1 — fixes from the first Cornerstone runs
  *   - Links: a link's query settings are checked only for strong words
@@ -223,7 +229,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.6.1';
+const VERSION = '1.6.2';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
@@ -360,7 +366,7 @@ function walkMd(job) {
   if (w.level === 'all' && Object.keys(w.pressed).length) out.push('**Buttons pressed that change data:** ' + listOf(w.pressed, 30), '');
   const rows = [];
   if (w.level === 'links') rows.push('- **Buttons and dialogs:** not opened. Choose "Also open buttons and dialogs" to capture them.');
-  if (Object.keys(w.confirmed || {}).length) out.push('**Opened only far enough to capture the box they show, then cancelled:** ' + listOf(w.confirmed, 30) + '. Nothing these buttons sent reached the site.', '');
+  if (Object.keys(w.confirmed || {}).length) out.push('**Opened only far enough to capture the box they show, then canceled:** ' + listOf(w.confirmed, 30) + '. Nothing these buttons sent reached the site.', '');
   if (w.level !== 'all' && Object.keys(w.change).length) rows.push('- **Would change data, so not pressed:** ' + listOf(w.change) + '. Choose "Also press buttons that change data" to include them.');
   if (Object.keys(w.never).length) rows.push('- **Never pressed:** ' + listOf(w.never) + '. Signing out, paying and acting as another user are never done.');
   if (Object.keys(w.window).length) rows.push('- **Open a new window, so not followed:** ' + listOf(w.window));
@@ -654,7 +660,7 @@ async function finalize(req, res, job) {
   const readMe = Buffer.from([
     'Screenshot library: ' + job.product + (job.client ? ' (' + job.client + ')' : '') + ', ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', captured ' + date + '.',
     '',
-    'screenshot-catalogue.pdf shows every screenshot with its name and description, for reviewing and sharing.',
+    'screenshot-catalog.pdf shows every screenshot with its name and description, for reviewing and sharing.',
     '',
     'To use these screenshots in storyboards and lab guides:',
     '',
@@ -678,7 +684,7 @@ async function finalize(req, res, job) {
   try {
     for (const f of files) fs.writeFileSync(path.join(dir, ...f.name.split('/')), f.content);
     fs.writeFileSync(path.join(dir, 'library.json'), libraryJson);
-    // The catalogue: made here, kept if it fails (the library is saved without it).
+    // The catalog: made here, kept if it fails (the library is saved without it).
     try {
       const out = path.join(dir, 'screenshots.pdf');
       await buildCatalogue({
@@ -687,11 +693,11 @@ async function finalize(req, res, job) {
       });
       pdf = fs.readFileSync(out);
     } catch (e) {
-      console.error('[job ' + job.id + '] catalogue not made: ' + String(e && e.message || e).split('\n')[0]);
+      console.error('[job ' + job.id + '] catalog not made: ' + String(e && e.message || e).split('\n')[0]);
     }
     fs.writeFileSync(path.join(dir, 'screenshots.zip'), zip.build([
       ...files, { name: 'library.json', content: libraryJson }, { name: 'READ ME.txt', content: readMe },
-      ...(pdf ? [{ name: 'screenshot-catalogue.pdf', content: pdf }] : []),
+      ...(pdf ? [{ name: 'screenshot-catalog.pdf', content: pdf }] : []),
     ]));
   } catch (e) {
     console.error('[job ' + job.id + '] save failed: ' + String(e && e.message || e).split('\n')[0]);
@@ -712,7 +718,7 @@ async function finalize(req, res, job) {
     descriptions_missing: missing, screens_left: remaining,
   };
   job.library_rows = rows.map((r) => ({ ...r, url: base + r.url }));
-  console.log('[job ' + job.id + '] library ready: ' + rows.length + ' image(s)' + (earlier ? ' (' + earlier + ' from earlier runs)' : '') + (pdf ? ', catalogue' : '') + ', kept ' + RETENTION_HOURS + ' hours');
+  console.log('[job ' + job.id + '] library ready: ' + rows.length + ' image(s)' + (earlier ? ' (' + earlier + ' from earlier runs)' : '') + (pdf ? ', catalog' : '') + ', kept ' + RETENTION_HOURS + ' hours');
   const n = rows.length - earlier;
   // The screen says only what to do: get the download into the customer's
   // own shared folder (it lasts; every storyboard reads it from there), the
@@ -728,7 +734,7 @@ async function finalize(req, res, job) {
     '',
     'To use them in storyboards and lab guides, unzip the download and upload everything, keeping its folders, to a folder anyone can open by link: a public GitHub repository, or a public Amazon S3 or Google Cloud Storage bucket (not Google Drive, SharePoint or OneDrive: their links do not open the images). Then paste that folder\'s link (on GitHub) or the link to library.json in it (anywhere else) into the **Screenshot Library URL** field of the **Storyboard and Lab Guide Developer**, for every storyboard and lab guide that needs these screenshots. The READ ME in the download says the same.',
     '',
-    ...(pdf ? ['**Screenshot catalogue (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): ' + (earlier ? 'all ' + rows.length + ' screenshots, from every run, each' : 'every screenshot') + ' with its name and description, then how the capture went. It is also in the download.', ''] : []),
+    ...(pdf ? ['**Screenshot catalog (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): ' + (earlier ? 'all ' + rows.length + ' screenshots, from every run, each' : 'every screenshot') + ' with its name and description, then how the capture went. It is also in the download.', ''] : []),
     '**These download links work until ' + whenUtc(job.expires) + '.** Download the files before then.',
     '',
     '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', each ' + job.size.width + ' × ' + job.size.height +
@@ -746,7 +752,7 @@ async function finalize(req, res, job) {
       'The next run\'s download has every screenshot from this run and the next.', '');
   }
   if (!pdf) {
-    // No catalogue: the screenshots and the report go on the screen instead.
+    // No catalog: the screenshots and the report go on the screen instead.
     md.push(earlier ? '**New in this run**' : '**Screenshots**', '', '| Screen | Description |', '|---|---|');
     job.library_rows.slice(earlier).forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
     md.push('');
