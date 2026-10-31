@@ -1,6 +1,38 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.6.3 (October 2026)
+ * AaGeJa Capture Service — v1.7.0 (October 2026)
+ *
+ * v1.7.0 — captures run side by side; libraries survive a redeploy
+ *   - Up to CAPTURE_CONCURRENCY captures (default 10) run at the same time,
+ *     each in its own browser, so one customer never waits for another's
+ *     capture to finish. Beyond that number a capture waits its turn, and its
+ *     status says how many are ahead of it (status_line).
+ *   - Every job is written to its own folder (job.json) when it is queued,
+ *     starts, finishes and is saved. On start-up the service reads them back:
+ *     saved libraries, their links and their Continue links keep working
+ *     until their 24 hours are up. A capture that was queued or running when
+ *     the service stopped is reported as interrupted ("run the agent again"):
+ *     the password is never written to disk, so it cannot be restarted.
+ *   - WORK_DIR defaults to <Railway volume>/capture when a volume is attached
+ *     (RAILWAY_VOLUME_MOUNT_PATH), so attaching the volume is the only setup.
+ *     Without a volume nothing survives a redeploy, as before. /health says
+ *     which: storage "volume" or "temporary".
+ *   - /health reports running (a count), capacity and queued.
+ *   - Nothing written below the "all" level (the 30 Oct Cornerstone Continue
+ *     run unfollowed four playlists and liked posts at "buttons"): the browser
+ *     refuses every request that would write data, whatever sent it
+ *     (capture.js writesData); Follow, Like and other toggles, links with no
+ *     address that run code, and pressed/not-pressed buttons are judged as
+ *     buttons that change data (walk.js). The report lists every refused
+ *     request first and no longer says no button changed data.
+ *   - Not clicked: a table's column headings, a filter panel's sections and
+ *     calendar views. Links with no address are grouped like buttons
+ *     ("Actions: <course>" opened once).
+ *   - Areas and names: a page's folder is the site's area (the active menu
+ *     item, else its navigation menu section, else the first menu step),
+ *     without "Open: …" or dates; a screen opened from another is named by
+ *     what was clicked ("Day view", "Bio – Transcript"). Report labels are cut
+ *     at a word and lose "(opens in a new window)".
  *
  * v1.6.3 — a shorter Library Ready screen
  *   - In the order a user acts on it: To capture more (with the Continue link,
@@ -207,7 +239,8 @@
  *                                         screenshots.zip and each image
  *
  * Start a job, then check back: a capture outlives any single HTTP request.
- * One job runs at a time; others wait in order.
+ * Up to CAPTURE_CONCURRENCY jobs run at once, each in its own browser; more
+ * wait in order.
  *
  * Credentials. The username and password go into the browser and nowhere
  * else. They are not written to disk, not logged, not returned by any route,
@@ -217,8 +250,10 @@
  *   CAPTURE_KEY          Required. Callers send it as X-AaGeJa-Key. Unset
  *                        means every keyed route refuses.
  *   RETENTION_HOURS      Hours a job and its library are kept (default 24).
- *   WORK_DIR             Where images wait between capture and finalize
- *                        (default /tmp/capture).
+ *   WORK_DIR             Where jobs, images and libraries are kept (default
+ *                        <RAILWAY_VOLUME_MOUNT_PATH>/capture when a Railway
+ *                        volume is attached, otherwise /tmp/capture).
+ *   CAPTURE_CONCURRENCY  Captures that run at the same time (default 10).
  *   CAPTURE_ALLOW_LOCAL  Set to 1 only on a test machine: allows http:// and
  *                        local addresses. Never set it on Railway.
  */
@@ -235,19 +270,23 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.6.3';
+const VERSION = '1.7.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
-const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
+const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
+const WORK_DIR = process.env.WORK_DIR || (VOLUME ? path.join(VOLUME, 'capture') : '/tmp/capture');
+// "volume" when jobs are kept on a disk that outlives a redeploy.
+const STORAGE = VOLUME && path.resolve(WORK_DIR).startsWith(path.resolve(VOLUME)) ? 'volume' : 'temporary';
 const RETENTION_HOURS = Number(process.env.RETENTION_HOURS) || 24;
 const RETENTION_MS = RETENTION_HOURS * 3600 * 1000;
+const CAPACITY = Math.max(1, Math.floor(Number(process.env.CAPTURE_CONCURRENCY) || 10));
 
 fs.mkdirSync(WORK_DIR, { recursive: true });
 
 const jobs = new Map();
 const shares = new Map();   // library token -> job id
 const queue = [];
-let running = null;
+const running = new Set();
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -407,20 +446,39 @@ function reportMd(job) {
     for (const s of warn) out.push('- ' + mdCell(screenLabel(s)) + ' — ' + mdCell(s.warning));
     out.push('');
   }
+  // Every request refused, first and in full: what would have changed data.
+  const lvl = job.walk ? job.walk.level : (job.click_level || 'links');
+  if (job.blocked && job.blocked.length) {
+    out.push('**Refused: requests that would change data**', '',
+      'The browser stopped ' + job.blocked_requests + ' request' + (job.blocked_requests === 1 ? '' : 's') + ' of these kinds before they reached the site:', '');
+    for (const r of job.blocked) out.push('- ' + mdCell(r));
+    out.push('');
+  }
   if (job.background_requests) {
     const nreq = job.background_requests + ' request' + (job.background_requests === 1 ? '' : 's');
-    const lvl = job.walk ? job.walk.level : 'links';
     const intro = lvl === 'all'
-      ? 'The capture pressed buttons that change data. While it worked, the pages sent ' + nreq + ' that were not plain reads:'
-      : lvl === 'buttons'
-        ? 'The capture opened pages, menus, buttons and dialogs and pressed no button that changes data. While it worked, the pages sent ' + nreq + ' that were not plain reads, as they do for anyone using them:'
-        : 'The capture only opened pages and menu items. While they loaded, the pages themselves sent ' + nreq + ' that were not plain reads, as they do for anyone viewing them:';
-    out.push(lvl === 'links' ? '**Requests the pages made while loading**' : '**Requests the pages made**', '', intro, '');
+      ? 'The capture pressed buttons that change data. These ' + nreq + ' went through:'
+      : 'The pages also sent ' + nreq + ' that were not plain reads (searches, tracking, loading data), as they do for anyone using them. These went through; nothing in their address or content said they change data:';
+    out.push('**Other requests the pages made**', '', intro, '');
     for (const r of job.background) out.push('- ' + mdCell(r));
-    if (job.background.length < job.background_requests) out.push('- (and repeats of these)');
+    const more = (job.background_kinds || job.background.length) - job.background.length;
+    if (more > 0) out.push('- and ' + more + ' more kind' + (more === 1 ? '' : 's'));
     out.push('');
   }
   return out.join('\n');
+}
+
+/** One line for the agent's "Still capturing" screen. */
+function statusLine(job) {
+  if (job.status === 'queued') {
+    const ahead = queue.indexOf(job);
+    return ahead > 0 ? 'Waiting to start: ' + ahead + ' capture' + (ahead === 1 ? '' : 's') + ' ahead of yours.' : 'Waiting to start: yours is next.';
+  }
+  if (job.status === 'running') {
+    const n = job.progress ? job.progress.done : 0;
+    return n + ' screenshot' + (n === 1 ? '' : 's') + ' so far.';
+  }
+  return '';
 }
 
 function publicJob(job, req) {
@@ -430,6 +488,7 @@ function publicJob(job, req) {
     status: job.status,
     stage: job.stage,
     queue_position: job.status === 'queued' ? queue.indexOf(job) + 1 : 0,
+    status_line: statusLine(job),
     progress: job.progress,
     product: job.product,
     client: job.client,
@@ -461,15 +520,19 @@ function publicJob(job, req) {
 
 // ── Job runner ─────────────────────────────────────────────────────────────
 
-async function pump() {
-  if (running || !queue.length) return;
-  const job = queue.shift();
-  running = job;
+/** Starts waiting jobs until CAPACITY are running. */
+function pump() {
+  while (running.size < CAPACITY && queue.length) runJob(queue.shift());
+}
+
+async function runJob(job) {
+  running.add(job);
   const creds = job._creds;
   delete job._creds;
   job.status = 'running';
   job.started = Date.now();
-  console.log('[job ' + job.id + '] started: ' + (job.targets.length ? job.targets.length + ' target(s)' : 'walk') + ', clicking ' + job.click_level);
+  saveJob(job);
+  console.log('[job ' + job.id + '] started: ' + (job.targets.length ? job.targets.length + ' target(s)' : 'walk') + ', clicking ' + job.click_level + ' (' + running.size + ' running)');
   try {
     await runCapture(job, creds, path.join(WORK_DIR, job.id));
     job.status = job.screens.length ? 'captured' : 'failed';
@@ -483,9 +546,55 @@ async function pump() {
     job.stage = '';
     job.finished = Date.now();
     console.log('[job ' + job.id + '] ' + job.status + ': ' + job.screens.length + ' captured, ' + job.not_captured.length + ' not captured');
-    running = null;
+    running.delete(job);
+    saveJob(job);
     setImmediate(pump);
   }
+}
+
+// ── Jobs on disk ───────────────────────────────────────────────────────────
+// Each job's record sits in its own folder, next to its images, so a restart
+// (a redeploy) finds every library that is still within its 24 hours. The
+// password is never part of the record (it lives only in job._creds, in
+// memory, until the browser closes).
+
+const jobFile = (id) => path.join(WORK_DIR, id, 'job.json');
+
+function saveJob(job) {
+  try {
+    fs.mkdirSync(path.join(WORK_DIR, job.id), { recursive: true });
+    const tmp = jobFile(job.id) + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(job, (k, v) => (k === '_creds' ? undefined : v)));
+    fs.renameSync(tmp, jobFile(job.id));
+  } catch (e) {
+    console.error('[job ' + job.id + '] record not written: ' + String(e && e.message || e).split('\n')[0]);
+  }
+}
+
+function loadJobs() {
+  let n = 0, cut = 0;
+  for (const id of fs.readdirSync(WORK_DIR)) {
+    if (!/^[a-f0-9]{24}$/.test(id)) continue;
+    let job;
+    try { job = JSON.parse(fs.readFileSync(jobFile(id), 'utf8')); } catch (_) { continue; }
+    if (!job || job.id !== id) continue;
+    // Queued or running when the service stopped: it cannot carry on without
+    // the password, which was never written down.
+    if (job.status === 'queued' || job.status === 'running') {
+      job.error = job.status === 'queued'
+        ? 'The capture service restarted before your capture started. Run the agent again.'
+        : 'The capture service restarted during your capture. Run the agent again.';
+      job.status = 'failed';
+      job.stage = '';
+      job.finished = job.finished || Date.now();
+      saveJob(job);
+      cut++;
+    }
+    jobs.set(id, job);
+    if (job.share && job.status === 'done') shares.set(job.share, id);
+    n++;
+  }
+  if (n) console.log('Read ' + n + ' job(s) from ' + WORK_DIR + (cut ? '; ' + cut + ' interrupted by the restart' : ''));
 }
 
 /** A job ends RETENTION_HOURS after it finished; a saved library, that long after it was saved. */
@@ -494,7 +603,7 @@ const jobEnds = (job) => job.expires || ((job.finished || job.created) + RETENTI
 function purge() {
   const now = Date.now();
   for (const [id, job] of jobs) {
-    if (job === running || job.status === 'queued') continue;
+    if (running.has(job) || job.status === 'queued') continue;
     if (jobEnds(job) < now) {
       fs.rmSync(path.join(WORK_DIR, id), { recursive: true, force: true });
       if (job.share) shares.delete(job.share);
@@ -506,7 +615,33 @@ function purge() {
     try { if (fs.statSync(p).mtimeMs < now - RETENTION_MS) fs.rmSync(p, { recursive: true, force: true }); } catch (_) {}
   }
 }
+loadJobs();
+purge();
 setInterval(purge, 10 * 60 * 1000).unref();
+
+// A redeploy stops the service with SIGTERM. Playwright listens for it too
+// (it closes the browsers), which would otherwise keep the service alive with
+// every running capture cut short and recorded as finished. Record them as
+// interrupted, then exit.
+let stopping = false;
+function shutdown(sig) {
+  if (stopping) return;
+  stopping = true;
+  const cut = [...running, ...queue];
+  for (const job of cut) {
+    job.error = job.status === 'queued'
+      ? 'The capture service restarted before your capture started. Run the agent again.'
+      : 'The capture service restarted during your capture. Run the agent again.';
+    job.status = 'failed';
+    job.stage = '';
+    job.finished = Date.now();
+    saveJob(job);
+  }
+  console.log(sig + ': stopping' + (cut.length ? ', ' + cut.length + ' capture(s) interrupted' : ''));
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 // ── Routes ─────────────────────────────────────────────────────────────────
 
@@ -589,11 +724,13 @@ async function start(req, res) {
   }
   jobs.set(id, job);
   queue.push(job);
+  saveJob(job);
+  const position = queue.indexOf(job) + 1;
   setImmediate(pump);
   send(res, 202, {
     job_id: id,
     status: job.status,
-    queue_position: queue.indexOf(job) + 1,
+    queue_position: running.size < CAPACITY ? 0 : position,
     targets: targets.length,
     continues: earlier ? earlier.rows.length : 0,
     status_url: baseUrl(req) + '/capture/status/' + id,
@@ -767,6 +904,7 @@ async function finalize(req, res, job) {
     if (pdfReport) md.push(pdfReport);
   }
   job.library.summary_md = md.join('\n');
+  saveJob(job);
   send(res, 200, { ...job.library, images: job.library_rows, not_captured: notCaptured });
 }
 
@@ -813,7 +951,8 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'GET' && p === '/health') {
       return send(res, 200, { status: 'ok', service: 'AaGeJa Capture Service', version: VERSION,
-        running: !!running, queued: queue.length, key_set: !!CAPTURE_KEY, library_hours: RETENTION_HOURS });
+        running: running.size, capacity: CAPACITY, queued: queue.length, storage: STORAGE,
+        key_set: !!CAPTURE_KEY, library_hours: RETENTION_HOURS });
     }
 
     const lib = p.match(/^\/library\/([a-f0-9]{32})\/(.+)$/);
@@ -859,6 +998,7 @@ const server = http.createServer(async (req, res) => {
 });
 
 server.listen(PORT, () => {
-  console.log('AaGeJa Capture Service v' + VERSION + ' on port ' + PORT +
+  console.log('AaGeJa Capture Service v' + VERSION + ' on port ' + PORT + ', ' + CAPACITY + ' captures at a time, ' +
+    (STORAGE === 'volume' ? 'jobs kept on the volume at ' : 'jobs kept until the next redeploy in ') + WORK_DIR +
     (CAPTURE_KEY ? '' : ' — CAPTURE_KEY not set, keyed routes will refuse'));
 });

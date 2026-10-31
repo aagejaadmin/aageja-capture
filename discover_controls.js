@@ -22,6 +22,12 @@
  *   6. Every control also carries sortable: true for a table's sort control
  *      (inside an [aria-sort] header, or a link whose script or address sorts,
  *      such as javascript:__doPostBack('…','Sort$Title')).
+ *   7. sortable is also true for any control in a table's column heading.
+ *   8. sortable is also true for a section of a filter panel (a control that
+ *      expands, inside an element whose class, id or label says filter).
+ *   9. Every control also carries pressed (its aria-pressed): a toggle.
+ *  10. A link or button in a menu also carries section: the label of the
+ *      submenu it sits in ("Learning" for Learning > Training Plans).
  * Everything else (the classes, the locator order, breadth, counts) is the
  * skill's own.
  *
@@ -107,9 +113,56 @@ function discoverControls(opts) {
     if (t === "INPUT" || t === "TEXTAREA") return "field";
     return "button";
   };
+  // ADDITION 8: a search or list page's filter panel (Cornerstone's DURATION,
+  // TYPE, MODALITY...): opening its sections shows the same page.
+  const FILTERS = "[class*=filter i]:not(html):not(body):not(main), [id*=filter i]:not(html):not(body):not(main), [aria-label*=filter i], [data-testid*=filter i]";
+  const opens = (el) => el.getAttribute("aria-expanded") !== null || el.tagName === "SUMMARY";
+  // ADDITION 7: a column heading (not a row heading): role columnheader, a th
+  // in a thead, a th with scope col, or a th in the table's first row.
+  const colHead = (el) => {
+    const th = el.closest("th,[role=columnheader]");
+    if (!th || th.closest("[role=dialog]")) return false;
+    if (th.getAttribute("role") === "columnheader" || th.scope === "col" || th.closest("thead")) return true;
+    const table = th.closest("table");
+    return !!(table && table.rows[0] && th.parentElement === table.rows[0]);
+  };
+  // ADDITION 10: the menu section a link sits in ("Learning" for Learning >
+  // Training Plans): the label of the control that opens the submenu, or the
+  // submenu's own label. The outermost one, so a page lands in its top-level
+  // area. Only a submenu counts: a list whose heading opens it (a button, or a
+  // control with aria-haspopup / aria-expanded), or one nested in a list item.
+  const MENU_BOX = "ul, ol, [role=menu], [role=group], [class*=submenu i], [class*=sub-menu i], [class*=dropdown i], [class*=flyout i], [class*=menu i]";
+  const sectionOf = (el) => {
+    let label = "";
+    let node = el.parentElement;
+    while (node && node !== document.body && node !== document.documentElement) {
+      if (node.matches(MENU_BOX)) {
+        let head = "";
+        const lb = node.getAttribute("aria-labelledby");
+        if (lb) head = txt(document.getElementById(lb.split(/\s+/)[0]));
+        if (!head && node.getAttribute("aria-label") && node.parentElement && node.parentElement.closest(MENU_BOX)) head = txt(node);
+        if (!head) {
+          let p = node.previousElementSibling;
+          while (p && !txt(p)) p = p.previousElementSibling;
+          const codeHead = p && p.tagName === "A" && /^\s*(#|javascript:|$)/i.test(p.getAttribute("href") || "");
+          const opener = p && (p.tagName === "BUTTON" || codeHead || p.hasAttribute("aria-haspopup") || p.hasAttribute("aria-expanded"));
+          const inItem = p && node.parentElement && /^(LI)$/.test(node.parentElement.tagName) || (p && node.parentElement && node.parentElement.getAttribute("role") === "menuitem");
+          if (p && !p.contains(el) && (opener || inItem) && p.querySelectorAll("a, button").length <= 1) head = txt(p);
+        }
+        head = head.replace(/[\s>›»▸▶▾▼▴▲◂◀⌄⌃]+$/, "").trim();
+        if (head && head.length <= 40 && head !== txt(el)) label = head;
+      }
+      if (node.matches(NAV)) break;
+      node = node.parentElement;
+    }
+    return label;
+  };
   const extra = (el, hidden) => {
     const raw = el.tagName === "A" ? (el.getAttribute("href") || "") : "";
+    // The site's navigation only: a ⋯ menu on a page is not an area.
+    const inMenu = !!el.closest(NAV);
     return {
+      section: inMenu ? sectionOf(el) : "", // ADDITION 10
       sel: cssPath(el),
       href: raw && !/^\s*(javascript:|#|mailto:|tel:)/i.test(raw) ? el.href : "",
       kind: kindOf(el),
@@ -120,7 +173,10 @@ function discoverControls(opts) {
       hint: ((typeof el.className === "string" ? el.className : "") + " " + (el.id || "") + " " + (el.getAttribute("data-icon") || "")).toLowerCase().slice(0, 120),
       download: el.hasAttribute("download"),
       hidden,
-      sortable: !!el.closest("[aria-sort]") || /(^|[^a-z])sort/i.test(raw) || /(^|[-_\s])sort(able|ing)?([-_\s]|$)/i.test(typeof el.className === "string" ? el.className : ""), // ADDITION 6
+      sortable: !!el.closest("[aria-sort]") || /(^|[^a-z])sort/i.test(raw) || /(^|[-_\s])sort(able|ing)?([-_\s]|$)/i.test(typeof el.className === "string" ? el.className : "") ||
+        colHead(el) || // ADDITION 7: a table's column heading sorts
+        (!!el.closest(FILTERS) && opens(el)), // ADDITION 8: a filter panel's sections
+      pressed: el.getAttribute("aria-pressed"), // ADDITION 9: a toggle
     };
   };
   // ── ADDITION 4: inside an open dialog, only the dialog ──

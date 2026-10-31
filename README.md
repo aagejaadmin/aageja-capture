@@ -4,6 +4,12 @@ Server side of the **Screenshot Library Builder** agent. Signs in to a product's
 
 Separate from content-api so a browser's memory use never touches content production.
 
+## Many customers at once (1.7.0)
+
+- Up to `CAPTURE_CONCURRENCY` captures (default 10) run at the same time, each in its own browser with its own sign-in. A capture beyond that waits its turn; its status says how many are ahead (`status_line`).
+- Measured on a 2-vCPU test machine with the Larkspur stand-in: 4 captures at once peaked at 1.7 GB for the service and its browsers; 6 captures with 4 slots all finished with identical screenshots. A real product's pages are heavier: check Railway's memory graph on the first busy day.
+- Each job is written to its own folder (`job.json`) when it is queued, starts, finishes and is saved. With a Railway volume attached, libraries, their links and their Continue links survive a redeploy for their 24 hours. A capture running during a redeploy is reported as interrupted ("run the agent again"); the password is never written down, so it cannot carry on.
+
 ## The walk (1.5.0)
 
 - **No pages listed:** the service walks the product from the page after sign-in, nearest screens first, up to 100 screenshots and 45 minutes. The same screen for another record (`/users/123`, `/users/456`, `?id=5`) is captured once.
@@ -16,7 +22,9 @@ Separate from content-api so a browser's memory use never touches content produc
 - The controls on each screen come from `discover_controls.js`, the platform-module-capture skill's script, with the additions marked in it. What may be clicked, and how screens are told apart, is in `walk.js`.
 - The run report says what it clicked, why it stopped, how many links and buttons it found but did not try, what it did not click and why, and what it opened but did not keep.
 - **Not kept (1.6.0):** a page that shows the site's error message ("An error occurred while processing your request", "Page not found", "Access denied"…, tested on its title and headings; nothing on it is opened), and a page that is the same as a screen already captured (the same title, headings, labels, controls and text on screen, numbers aside: Home and Welcome). A listed page that shows the error message goes in Not captured.
-- **Not clicked (1.6.1):** sorting, paging, carousel and calendar controls (they show the same screen). The same button on each item of a list ("Actions: <course>", "Approve <name>") is opened for the first item only. A link's query settings are checked only for strong words (delete, approve, send…), so Cornerstone's `…/UserTranscript/MainView.aspx?Reset=true` is followed; the path and route names are checked for all of them.
+- **Never written (1.7.0):** below `all`, the browser refuses any request that would write data, whatever sent it: DELETE, PUT, PATCH, or a POST whose address (`unfollowTrainingBFF`, `PostChangesV4`, `…/Actions/Execute`), GraphQL mutation, ASP.NET event or JSON action says so. Reads sent as POST (search, GraphQL queries, tracking) go through. Follow, Like, Rate and other toggles, links with no address that run code, and pressed/not-pressed buttons are judged as buttons that change data. The report lists every refused request first, then the others.
+- **Not clicked (1.6.1, 1.7.0):** sorting, paging, carousel and calendar controls (they show the same screen); from 1.7.0 also a table's column headings, a filter panel's sections and calendar views (Day view, Week view, Agenda view). The same button on each item of a list ("Actions: <course>", "Approve <name>") is opened for the first item only. A link's query settings are checked only for strong words (delete, approve, send…), so Cornerstone's `…/UserTranscript/MainView.aspx?Reset=true` is followed; the path and route names are checked for all of them.
+- **Areas (1.7.0):** a page's folder is the site's own area: the active menu item, else the navigation menu section its link sat in ("Learning" for Learning > Training Plans), else the first menu step. An action word ("Open: …") and dates are dropped. A screen opened from another is named by what was clicked ("Day view", "Bio – Transcript").
 - **Names (1.6.1):** a page's visible heading; if it has none, its tab title, unless the title is only the site's tagline (Cornerstone's "Realize Your Potential"); then the biggest bold text near the top. "Still loading" is reported only while a loading sign (a spinner, a busy region) is on screen.
 - **Continue (1.6.0):** a walk stops at 100 screenshots (or 45 minutes). `continue_from` = the earlier run's library link: the next run signs in again, carries on with the screens the earlier run found but did not open, skips what it captured, and saves one library holding both runs. Within the earlier library's 24 hours; same environment; Pages blank; the first run's clicking choice is used. `CAPTURE_MAX_SCREENS` lowers the limit on a test machine only.
 
@@ -38,9 +46,11 @@ Separate from content-api so a browser's memory use never touches content produc
   - `CAPTURE_KEY`: required. A long random string. The agent sends it as `X-AaGeJa-Key`.
   - `RETENTION_HOURS`: optional. Defaults to 24. How long a job and its library are kept.
   - `CAPTURE_ALLOW_LOCAL`: never set on Railway. Set to `1` only on a test machine, to allow `http://` and local addresses.
+  - `CAPTURE_CONCURRENCY`: optional. Defaults to 10. Captures that run at the same time.
+  - `WORK_DIR`: optional. Defaults to `<volume>/capture` when a volume is attached, else `/tmp/capture`.
   - `GITHUB_TOKEN`: no longer used from 1.3.0. Delete it.
 - Railway does not redeploy on a variable change by itself. Click the "Changes" badge to deploy.
-- A redeploy clears the service's disk: captures not yet saved and libraries still within their 24 hours are lost.
+- **Attach a volume** (any mount path, for example `/data`). Railway then sets `RAILWAY_VOLUME_MOUNT_PATH` and the service keeps its jobs there; `/health` shows `"storage":"volume"`. Without one (`"storage":"temporary"`) a redeploy clears every library. With a volume, a redeploy has a short outage (Railway runs one deployment at a time on a volume) and cuts off captures that are running: deploy when `/health` shows `"running":0`.
 
 ## Routes
 
@@ -60,8 +70,8 @@ Separate from content-api so a browser's memory use never touches content produc
 - **Credentials:** optional (an address that opens without signing in needs none). When given, they arrive with each run, are used in the browser only, and are never written, logged or returned. A key in the address's query string is never written to the library: it records page paths only. The agent tells the person running it that the password stays in MindStudio's run history and to change it after the capture.
 - **What it does on the site** depends on `click_level` (The walk, above). Below `all`:
   - Menu steps, links and web addresses containing words that change data (delete, save, submit, sign out and similar) are refused before anything is clicked.
-  - After sign-in, the browser refuses DELETE, PUT and PATCH requests, and form posts that load a new page when the service did not start them.
-  - Pages still make their own background requests while loading, as they do for anyone viewing them. Every one that is not a plain read is listed in the run report.
+  - After sign-in, the browser refuses every request that would write data (The walk, Never written), and form posts that load a new page when the service did not start them.
+  - Pages still make their own background requests while loading, as they do for anyone viewing them. Every refused request, then every other one that is not a plain read, is listed in the run report.
   - New windows are closed.
 - **Public addresses only:** the environment must be a named site on the public internet, and the browser refuses any request to this machine, private networks or cloud-internal names.
 - **Same site only:** web addresses on another site are refused.

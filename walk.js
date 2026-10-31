@@ -31,6 +31,15 @@ const LINK_DANGER = /\b(delete|remove|deactivate|disable|archive|purge|reset|rev
 // Buttons that change data. Pressed only at the "all" level.
 const COMMIT = /\b(delete|remove|deactivate|disable|archive|purge|reset|revoke|terminate|save|submit|approve|reject|decline|send|publish|unpublish|import|upload|assign|unassign|enrol+|enroll|register|request|launch|confirm|create|add|update|apply|finish|complete|done|ok|okay|yes|accept|invite|notify|remind|share|email|export|generate|run|start|stop|restart|sync|copy|duplicate|clone|move|transfer|merge|lock|unlock|activate|enable|mark|clear|undo|restore|follow|unfollow|like|favou?rite|join|leave|withdraw|discard|post|reply|comment|upgrade|downgrade|grant|deny|block|unblock|suspend|reopen|recall|nominate|certify|schedule|book|reserve|rate|vote|claim|redeem)\b/i;
 
+// Toggles that record something about the user the moment they are clicked:
+// following, liking, rating, bookmarking. On sites they are often links with
+// no address (Cornerstone's "Unfollow: <playlist>" and "Like"), so they are
+// checked on links as well as buttons.
+const TOGGLE = /\b(follow|unfollow|like|unlike|favou?rite|unfavou?rite|bookmark|unbookmark|pin|unpin|star|unstar|vote|upvote|downvote|rate|join|leave|subscribe|unsubscribe|watch|unwatch|mute|unmute|save\s+for\s+later|add\s+to)\b/i;
+// The same, for a real link's address only: a page can be named "Leave" or
+// "Courses you might like", but /posts/7/like is not a page.
+const TOGGLE_LINK = /\b(follow|unfollow|like|unlike|favou?rite|unfavou?rite|bookmark|unbookmark|upvote|downvote|subscribe|unsubscribe)\b/i;
+
 // "Add User", "+ New report", "Create course" on a page open a form. The same
 // words inside a dialog or as a form's submit button save it. "Add to ..."
 // ("Add to cart", "Add to transcript") changes data.
@@ -47,8 +56,9 @@ const SKIP_ANY = /\b(download|print)\b/i;
 // carousel, stepping a calendar by day, week or month or picking a date. Not
 // a new screen for a storyboard, and each step finds more of the same, so
 // these are never clicked. (Cornerstone: "Name sortable column", "Next
-// Page, 2", "Play Carousel", "Previous Month", "272026-09-27", "►".)
-const BROWSE = /(sortable\s+column|\bsort(ed|ing)?\s+(by|ascending|descending)\b|\bsorted\b|^sort$|^(first|last|next|previous|prev)\s+(page|slide|month|week|day|year)\b|^page\s+\d+$|^next\s+page\b|^go\s+to\s+(page|slide)\b|\b(play|pause|stop)\s+(the\s+)?carousel\b|^(next|previous)\s+slide\b|^today$|^[►◄▶◀«»‹›<>]+$|^\d{1,3}$|\d{4}-\d{2}-\d{2}|^(january|february|march|april|may|june|july|august|september|october|november|december),?\s+\d{4}$)/i;
+// Page, 2", "Play Carousel", "Previous Month", "272026-09-27", "►",
+// "Week view".)
+const BROWSE = /(sortable\s+column|\bsort(ed|ing)?\s+(by|ascending|descending)\b|\bsorted\b|^sort$|^(first|last|next|previous|prev)\s+(page|slide|month|week|day|year)\b|^page\s+\d+$|^next\s+page\b|^go\s+to\s+(page|slide)\b|\b(play|pause|stop)\s+(the\s+)?carousel\b|^(next|previous)\s+slide\b|^today$|\b(day|week|work\s+week|month|year|agenda|list|grid|tile|card|timeline|schedule)\s+view\b|^[►◄▶◀«»‹›<>]+$|^\d{1,3}$|\d{4}-\d{2}-\d{2}|^(january|february|march|april|may|june|july|august|september|october|november|december),?\s+\d{4}$)/i;
 
 // Class or id words that tell what a button with no name does.
 const HINT_COMMIT = /(delete|trash|remove|bin\b)/i;
@@ -143,17 +153,28 @@ function classify(c) {
   if (c.kind === 'skip' || c.kind === 'select' || c.kind === 'field') return 'skip';
   if (SKIP.test(text) || SKIP_ANY.test(text) || c.download) return 'skip';
   if (BROWSE.test(text) || c.sortable) return 'browse';
+  // A pressed/not-pressed button (aria-pressed) is a toggle: it records a
+  // choice the moment it is clicked.
+  if (c.pressed === 'true' || c.pressed === 'false' || c.pressed === 'mixed') return 'commit';
+  // A link with no address ("#", "javascript:") runs code, like a button. In
+  // the navigation it is still a menu step; anywhere else it is judged as a
+  // button below.
+  const codeLink = c.kind === 'link' && !c.href;
+  // Follow, Like, Rate...: on a button, a ⋯ menu item or a link with no
+  // address. Not on tabs or real links, which only open a page.
+  if ((codeLink || c.kind === 'button' || c.kind === 'submit' || c.kind === 'menuitem') && c.controlClass !== 'tab' && TOGGLE.test(text)) return 'commit';
   // Links, tabs, tree items, and items of a menu in the navigation. Items of a
   // ⋯ menu on the page are actions, judged like buttons below.
-  const navLike = c.kind === 'link' || c.kind === 'treeitem' || c.controlClass === 'tab' || c.controlClass === 'nav-link' ||
+  const navLike = (c.kind === 'link' && !(codeLink && !c.inNav)) || c.kind === 'treeitem' || c.controlClass === 'tab' || c.controlClass === 'nav-link' ||
     (c.controlClass === 'overflow-item' && c.inNav);
   if (navLike) {
     if (c.href && FILE_EXT.test(c.href.split(/[?#]/)[0])) return 'skip';
     const lw = c.href ? linkWords(c.href) : { path: '', query: '' };
-    if (LINK_DANGER.test(text) || LINK_DANGER.test(lw.path) || LINK_STRONG.test(lw.query)) return 'commit';
-    // A tab or menu item that is a button runs code, not a page load: it is
-    // judged by the button words too ("Export", "Archive").
-    if (c.kind !== 'link' && COMMIT.test(text)) return 'commit';
+    if (LINK_DANGER.test(text) || LINK_DANGER.test(lw.path) || TOGGLE_LINK.test(lw.path) || LINK_STRONG.test(lw.query)) return 'commit';
+    // A tab or menu item that is a button, or a link with no address, runs
+    // code, not a page load: it is judged by the button words too ("Export",
+    // "Archive").
+    if ((c.kind !== 'link' || codeLink) && COMMIT.test(text)) return 'commit';
     if (!text) return 'unnamed';
     return 'nav';
   }
@@ -205,4 +226,4 @@ function stateInPage() {
   return { dialog, tabs, h1, sig };
 }
 
-module.exports = { NEVER, LINK_DANGER, LINK_STRONG, COMMIT, OPENER, SKIP, BROWSE, ERROR_PAGE, classify, linkWords, ALLOWED, urlPattern, addressWords, norm, stateInPage, FILE_EXT };
+module.exports = { NEVER, LINK_DANGER, LINK_STRONG, COMMIT, TOGGLE, TOGGLE_LINK, OPENER, SKIP, BROWSE, ERROR_PAGE, classify, linkWords, ALLOWED, urlPattern, addressWords, norm, stateInPage, FILE_EXT };

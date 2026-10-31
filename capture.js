@@ -12,8 +12,11 @@
  *     At every level it never signs out, pays, or acts as another user.
  *   - Below the "all" level, menu steps, links and buttons whose words could
  *     change data are refused before anything is clicked or opened, and after
- *     sign-in the browser refuses DELETE, PUT and PATCH requests, and form
- *     posts that load a new page when the service did not start them.
+ *     sign-in the browser refuses DELETE, PUT and PATCH requests, form posts
+ *     that load a new page when the service did not start them, and any
+ *     request that would write data whatever sent it (writesData below: its
+ *     address, a GraphQL mutation, an ASP.NET event, a JSON action). Every
+ *     refused request is listed in the run report.
  *   - Pages still make their own background requests, as they do for any
  *     person viewing them. Every one that is not a plain read (GET) is
  *     recorded and listed in the run report.
@@ -525,9 +528,95 @@ function cleanSourceUrl(u) {
   try { const x = new URL(u); return x.origin + x.pathname; } catch (_) { return ''; }
 }
 
+/**
+ * A screen opened by a control on another screen: "Day view", not "Events
+ * Calendar Day view", when the parent screen is the area itself; otherwise
+ * "Bio – Transcript".
+ */
+function childName(module, parent, label) {
+  const l = String(label || '').replace(/[▾▼▴▲▸▶◂◀⌄⌃]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!l) return parent;
+  return !parent || String(parent).toLowerCase() === String(module || '').toLowerCase() ? l : parent + ' – ' + l;
+}
+
+/**
+ * An area (folder) name from a menu or link label: no leading action word
+ * ("Open: …", "Complete: …") and no dates ("Due Date 1/3/2026").
+ */
+function areaName(t) {
+  const x = String(t || '')
+    .replace(/[▾▼▴▲▸▶◂◀⌄⌃›»]+/g, ' ')
+    .replace(/^\s*(open|view|complete|start|continue|launch|go\s+to|resume|review)\s*:\s*/i, '')
+    .replace(/\b(due(\s+date)?|due\s+by|on|by)?\s*\d{1,2}[\/.-]\d{1,2}[\/.-]\d{2,4}\b/gi, '')
+    .replace(/\s+/g, ' ').trim();
+  return x.length <= 60 ? x : x.slice(0, 60).replace(/\s+\S*$/, '');
+}
+
 /** Path only, no site and no query string: what a saved library may record. */
 function pathOnly(u) {
   try { return new URL(u).pathname; } catch (_) { return ''; }
+}
+
+// ── Requests that would write data ─────────────────────────────────────────
+// Below the "all" level these are refused whatever sent them, a control the
+// walk judged safe or the page's own script (Cornerstone's Unfollow and Like
+// were links with no address, and wrote through POST requests). Reads that
+// many sites send as POST (search, GraphQL queries, analytics) go through.
+
+// Words split out of an address, an event name or an operation name:
+// "unfollowTrainingBFF" -> "unfollow Training BFF", "PostChangesV4" -> "Post Changes V4".
+const splitWords = (t) => String(t || '').replace(/([a-z0-9])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2').replace(/[-_/.$:=&?,;+%]+/g, ' ');
+const WRITE = /\b(delete|remove|unfollow|follow|unlike|like|favou?rite|unfavou?rite|bookmark|unbookmark|vote|upvote|downvote|rate|save|update|upsert|create|insert|submit|approve|reject|decline|assign|unassign|enrol+|enroll|archive|unarchive|execute|publish|unpublish|send|upload|import|withdraw|cancel|mark|add|set|join|pin|unpin|post\s+changes|change\s+status|move|copy|merge|reset|revoke|deactivate|activate|complete)\b/i;
+// Words that look like writes but read: "auto complete" (search suggestions).
+const READ_PHRASE = /\bauto\s+complete\b/gi;
+
+/** The reason a request would write data, or ''. */
+function writesData(r) {
+  const m = r.method();
+  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return '';
+  if (m === 'DELETE' || m === 'PUT' || m === 'PATCH') return m;
+  let u;
+  try { u = new URL(r.url()); } catch (_) { return ''; }
+  const words = (t) => splitWords(t).replace(READ_PHRASE, ' ');
+  let p = u.pathname;
+  try { p = decodeURIComponent(p); } catch (_) {}
+  if (WRITE.test(words(p))) return 'address';
+  const q = [...u.searchParams].map(([k, v]) => /^(action|op|operation|method|cmd|command|do|mode)$/i.test(k) ? v : '').join(' ');
+  if (WRITE.test(words(q))) return 'address';
+  const body = (r.postData() || '').slice(0, 20000);
+  if (!body) return '';
+  // GraphQL: a mutation is a write, a query is a read.
+  if (/graphql/i.test(p) || /"query"\s*:/.test(body)) {
+    let ops = [];
+    try { const j = JSON.parse(body); ops = Array.isArray(j) ? j : [j]; } catch (_) {}
+    for (const o of ops) {
+      if (o && typeof o.query === 'string' && /^\s*(#[^\n]*\n\s*)*mutation\b/.test(o.query)) return 'mutation';
+      if (o && typeof o.query === 'string' && /\bmutation\s+[A-Za-z_]/.test(o.query) && !/\bquery\s+[A-Za-z_{(]/.test(o.query)) return 'mutation';
+      if (o && !o.query && o.operationName && WRITE.test(words(o.operationName))) return 'mutation';
+    }
+    if (!ops.length && /\bmutation\b/.test(body)) return 'mutation';
+    return '';
+  }
+  // ASP.NET: the control that posted back is named in __EVENTTARGET.
+  if (/__EVENTTARGET=/.test(body)) {
+    let f;
+    try { f = new URLSearchParams(body); } catch (_) { f = null; }
+    const ev = f ? (f.get('__EVENTTARGET') || '') + ' ' + (f.get('__EVENTARGUMENT') || '') : '';
+    const btn = f ? [...f.keys()].filter((k) => /(btn|button|lnk|link|cmd)/i.test(k)).join(' ') : '';
+    if (WRITE.test(words(ev)) || WRITE.test(words(btn))) return 'event';
+    return '';
+  }
+  // JSON with an action field: { "action": "follow" }.
+  if (/^\s*[{[]/.test(body)) {
+    let j = null;
+    try { j = JSON.parse(body); } catch (_) {}
+    const one = Array.isArray(j) ? j[0] : j;
+    if (one && typeof one === 'object') {
+      const act = ['action', 'op', 'operation', 'method', 'command', 'type'].map((k) => (typeof one[k] === 'string' ? one[k] : '')).join(' ');
+      if (WRITE.test(words(act))) return 'action';
+    }
+  }
+  return '';
 }
 
 // ── Addresses that are not on the public internet ──────────────────────────
@@ -630,13 +719,16 @@ async function runCapture(job, creds, outDir) {
     page.on('dialog', (d) => ((d.type() === 'beforeunload' || state.acceptDialogs) ? d.accept() : d.dismiss()).catch(() => {}));
 
     // Addresses that are not on the public internet are refused at all times.
-    // After the first sign-in the browser also refuses DELETE, PUT and PATCH,
-    // and a form post that loads a new page when the service itself is not
+    // After the first sign-in, below the "all" level, the browser also refuses
+    // every request that would write data (writesData: DELETE, PUT, PATCH, or
+    // a POST whose address, GraphQL mutation, ASP.NET event or JSON action
+    // says so), and a form post that loads a new page when the service itself is not
     // acting (a page posting on its own). Older web apps move between pages
     // with form posts, so those are allowed while the service opens a listed
     // page or clicks a safe menu step. Every other request that is not a plain
     // read is let through, recorded, and listed in the run report.
     const seen = new Set();
+    const refusedSeen = new Set((job.blocked || []).map((x) => x.split(' (')[0]));
     await context.route('**/*', (route) => {
       const r = route.request();
       const m = r.method();
@@ -649,23 +741,25 @@ async function runCapture(job, creds, outDir) {
       }
       if (state.probe && (r.isNavigationRequest() || (m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS'))) {
         job.blocked_requests++;
-        if (job.blocked.length < 20) job.blocked.push(m + ' ' + cleanSourceUrl(r.url()) + ' (sent by a button that changes data; refused)');
+        const k = m + ' ' + pathOnly(r.url());
+        if (!refusedSeen.has(k) && job.blocked.length < 200) { refusedSeen.add(k); job.blocked.push(k); }
         return route.abort('blockedbyclient');
       }
-      const write = m === 'DELETE' || m === 'PUT' || m === 'PATCH';
+      const write = state.guard && level !== 'all' ? writesData(r) : '';
       const postNav = m === 'POST' && r.isNavigationRequest() && !state.acting;
       // The "all" level was chosen to change data: nothing is refused but
       // addresses off the public internet.
       if (state.guard && level !== 'all' && (write || postNav)) {
         job.blocked_requests++;
-        if (job.blocked.length < 20) job.blocked.push(m + ' ' + cleanSourceUrl(r.url()));
+        const k = m + ' ' + pathOnly(r.url());
+        if (!refusedSeen.has(k) && job.blocked.length < 200) { refusedSeen.add(k); job.blocked.push(k); }
         return route.abort('blockedbyclient');
       }
       // A form post the service's own menu click started is not the page's doing.
       if (state.guard && m !== 'GET' && m !== 'HEAD' && m !== 'OPTIONS' && !(r.isNavigationRequest() && state.acting)) {
         job.background_requests++;
         const k = m + ' ' + pathOnly(r.url());
-        if (!seen.has(k) && job.background.length < 30) { seen.add(k); job.background.push(k); }
+        if (!seen.has(k)) { seen.add(k); job.background_kinds = (job.background_kinds || 0) + 1; if (job.background.length < 60) job.background.push(k); }
       }
       return route.continue();
     });
@@ -856,7 +950,12 @@ async function runCapture(job, creds, outDir) {
     async function walkFrom(seeds, followLinks) {
       const w = job.walk;
       // Each name once: the same Sign out on every page is one entry.
-      const tally = (bucket, label) => { const k = masker(label || '(no name)').slice(0, 60); bucket[k] = 1; };
+      // A label for the report: screen-reader notes dropped, cut at a word.
+      const short = (t) => {
+        const x = String(t).replace(/[,(\s]*\(?\s*(this\s+link\s+)?opens?\s+(in\s+)?a\s+new\s+(window|tab)\s*\)?[.,\s]*/gi, ' ').replace(/\s+/g, ' ').trim();
+        return x.length <= 60 ? x : x.slice(0, 60).replace(/\s+\S*$/, '') + '…';
+      };
+      const tally = (bucket, label) => { const k = short(masker(label || '(no name)')) || '(no name)'; bucket[k] = 1; };
       // Continuing an earlier walk: what it saw is seen, what it left is the queue.
       const R = job.resume || {};
       const seenFp = new Set(R.seenFp || []);
@@ -975,7 +1074,7 @@ async function runCapture(job, creds, outDir) {
         const d = masker(s.dialog);
         await shoot({
           moduleName: st.parent ? st.parent.module : 'Home',
-          screenName: d && d !== 'dialog' ? d : parentScreen + ' ' + masker(last.label) + ' confirmation',
+          screenName: d && d !== 'dialog' ? d : childName(st.parent ? st.parent.module : 'Home', parentScreen, masker(last.label) + ' confirmation'),
           facts, warning: '', target: masker(st.trail.join(' > ')),
           reached: masker(st.trail.join(' > ')) + ' (the box was then canceled)',
         });
@@ -1058,13 +1157,15 @@ async function runCapture(job, creds, outDir) {
           const parentScreen = st.parent ? st.parent.screen : 'Home';
           if (st.home) { moduleName = 'Home'; screenName = 'Home'; }
           else if (navigated && !s.dialog) {
-            moduleName = facts.active_nav || masker((st.names || st.trail)[0] || '') || urlPath[0] || 'general';
+            // The site's own area (the active menu item, else the menu section the
+            // link sat in), else the first menu step.
+            moduleName = areaName(facts.active_nav) || areaName(masker(st.section || '')) || areaName(masker((st.names || st.trail)[0] || '')) || urlPath[0] || 'general';
             // Every page is named by its own heading, as the page list names one.
             screenName = facts.h1 || nameFromTitle(facts.title) || masker(facts.big) || masker(st.trail[st.trail.length - 1] || '') || 'page';
           } else if (s.dialog) {
             const d = masker(s.dialog);
-            screenName = d && d !== 'dialog' ? d : parentScreen + ' ' + masker(last ? last.label : '');
-          } else screenName = parentScreen + ' ' + masker(last ? last.label : '');
+            screenName = d && d !== 'dialog' ? d : childName(moduleName, parentScreen, masker(last ? last.label : ''));
+          } else screenName = childName(moduleName, parentScreen, masker(last ? last.label : ''));
           seenSig.add(same);
           await shoot({
             moduleName, screenName, facts, warning,
@@ -1088,7 +1189,8 @@ async function runCapture(job, creds, outDir) {
         const prefix = (c) => { const m = /^([^:]{2,30}):\s+\S/.exec(String(c.label || '')); return m ? W.norm(m[1]) : ''; };
         const shapeOf = (c) => prefix(c) ? 'item|' + c.frame + '|' + c.kind + '|' + prefix(c)
           : c.frame + '|' + String(c.sel || '').replace(/:nth-of-type\(\d+\)/g, '').replace(/\d+/g, '#') + '|' + c.kind + '|' + firstWord(c);
-        const listed = (c) => c.kind !== 'link' && !c.inNav && !c.hidden && !!c.label;
+        // A link with no address runs code like a button, so it is grouped like one.
+        const listed = (c) => (c.kind !== 'link' || !c.href) && !c.inNav && !c.hidden && !!c.label;
         const shapeCount = new Map();
         for (const c of cands) if (listed(c)) shapeCount.set(shapeOf(c), (shapeCount.get(shapeOf(c)) || 0) + 1);
         const grouped = (c) => listed(c) && shapeCount.get(shapeOf(c)) >= (prefix(c) ? 2 : 3);
@@ -1113,7 +1215,10 @@ async function runCapture(job, creds, outDir) {
           // The buttons level probes a data-changing button for its "Are you
           // sure?" box instead of skipping it. Never a link: following one is
           // a page load, and that is the change.
-          const probe = level === 'buttons' && cls === 'commit' && c.kind !== 'link' && !c.href && !c.hidden && deep;
+          // A toggle (Follow, Like, a pressed/not-pressed button) shows no box
+          // to capture, so it is not probed.
+          const toggle = W.TOGGLE.test(c.label || '') || (c.pressed != null && c.pressed !== '');
+          const probe = level === 'buttons' && cls === 'commit' && !c.href && !toggle && !c.hidden && deep;
           if (!W.ALLOWED[level].has(cls) && !probe) { if (cls === 'commit' && !c.hidden) tally(w.change, c.label); continue; }
           const commit = cls === 'commit' && !probe;
           const phase = commit || st.phase === 2 ? 2 : 1;
@@ -1127,7 +1232,7 @@ async function runCapture(job, creds, outDir) {
             const p = W.urlPattern(c.href).pattern;
             if (seenPat.has(p)) continue;
             seenPat.add(p);
-            q.push({ base: c.href, actions: [], trail: st.trail.concat(c.label || ''), names: (st.names || st.trail).concat(c.label || ''), parent: node, phase, commit, capture: true });
+            q.push({ base: c.href, actions: [], trail: st.trail.concat(c.label || ''), names: (st.names || st.trail).concat(c.label || ''), section: c.section || st.section || '', parent: node, phase, commit, capture: true });
           } else {
             if (c.hidden || !deep) continue;
             if (c.kind === 'link' && !followLinks) continue;
@@ -1144,6 +1249,7 @@ async function runCapture(job, creds, outDir) {
             q.push({
               base: st.base, actions: st.actions.concat({ frame: c.frame, sel: c.sel, label: c.label, kind: c.kind }),
               trail: st.trail.concat(c.label || 'unnamed'), names: cls === 'reveal' ? (st.names || st.trail) : (st.names || st.trail).concat(c.label || 'unnamed'),
+              section: c.section || st.section || '',
               parent: node, phase, commit, probe,
               capture: !(cls === 'reveal' && level === 'links'),
             });
@@ -1200,4 +1306,4 @@ async function runCapture(job, creds, outDir) {
   }
 }
 
-module.exports = { runCapture, parseTargets, parseSize, slug, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError, DANGER, LEVELS, MAX_SCREENS, maskString };
+module.exports = { runCapture, parseTargets, parseSize, slug, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError, DANGER, LEVELS, MAX_SCREENS, maskString, writesData };
