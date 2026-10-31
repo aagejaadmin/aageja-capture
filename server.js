@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.6.2 (October 2026)
+ * AaGeJa Capture Service — v1.6.3 (October 2026)
+ *
+ * v1.6.3 — a shorter Library Ready screen
+ *   - In the order a user acts on it: To capture more (with the Continue link,
+ *     when the run stopped at its limit), the download and the catalog, the
+ *     24-hour limit as "within 24 hours (by <time> UTC)", two next steps, and
+ *     one line on anything not captured, not kept or to check.
  *
  * v1.6.2 — US spelling; a progress bar is not loading
  *   - US spelling in everything a user reads: "catalog" (the PDF in the zip
@@ -229,7 +235,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.6.2';
+const VERSION = '1.6.3';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const WORK_DIR = process.env.WORK_DIR || '/tmp/capture';
@@ -727,29 +733,31 @@ async function finalize(req, res, job) {
   // are in the PDF; the table is shown only if the PDF could not be made.
   const toCheck = reports.reduce((n, r) => n + (r.check || 0), 0);
   const errorPages = reports.reduce((n, r) => n + (r.errors || 0), 0);
-  const allRuns = reports.length > 1 ? ' (all runs)' : '';
-  const md = [
-    '**Download your screenshots:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + ')' +
-      (earlier ? ': all ' + rows.length + ', from this run and the earlier run' + (job.runs > 2 ? 's' : '') + '. Keep only this download: it replaces the earlier one.' : ''),
-    '',
-    'To use them in storyboards and lab guides, unzip the download and upload everything, keeping its folders, to a folder anyone can open by link: a public GitHub repository, or a public Amazon S3 or Google Cloud Storage bucket (not Google Drive, SharePoint or OneDrive: their links do not open the images). Then paste that folder\'s link (on GitHub) or the link to library.json in it (anywhere else) into the **Screenshot Library URL** field of the **Storyboard and Lab Guide Developer**, for every storyboard and lab guide that needs these screenshots. The READ ME in the download says the same.',
-    '',
-    ...(pdf ? ['**Screenshot catalog (PDF):** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): ' + (earlier ? 'all ' + rows.length + ' screenshots, from every run, each' : 'every screenshot') + ' with its name and description, then how the capture went. It is also in the download.', ''] : []),
-    '**These download links work until ' + whenUtc(job.expires) + '.** Download the files before then.',
-    '',
-    '**Saved:** ' + rows.length + ' screenshot' + (rows.length === 1 ? '' : 's') + ', each ' + job.size.width + ' × ' + job.size.height +
-      (earlier ? ': ' + n + ' new in this run, and ' + earlier + ' from the earlier run' + (job.runs > 2 ? 's' : '') + '. The download has all of them.' : '.'),
-  ];
-  if (notCaptured.length) md.push('', '**Not captured' + allRuns + ':** ' + notCaptured.length + ' page' + (notCaptured.length === 1 ? '' : 's') + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
-  if (errorPages) md.push('', '**Showed the site\'s error message, so not kept' + allRuns + ':** ' + errorPages + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
-  if (toCheck) md.push('', '**Check' + allRuns + ':** ' + toCheck + ' screenshot' + (toCheck === 1 ? '' : 's') + ' that ' + (toCheck === 1 ? 'was' : 'were') + ' still loading or looked empty' + (pdf ? ', listed at the end of the PDF.' : ', listed below.'));
-  if (missing) md.push('', '_' + missing + ' description' + (missing === 1 ? ' was' : 's were') + ' not written, so ' + (missing === 1 ? 'it uses' : 'they use') + ' the screen name._');
-  md.push('');
+  // The screen, in the order a user acts on it: capture more (when the run
+  // stopped at its limit), the download and catalog, what to do with them,
+  // then one line on anything not kept or to check. The detail is in the PDF.
+  const when = whenUtc(job.expires);
+  const plural = (k, one, many) => k + ' ' + (k === 1 ? one : many);
+  const md = [];
   if (remaining) {
-    md.push('**Capture more:** this run stopped with ' + remaining + ' link' + (remaining === 1 ? '' : 's') + ' and button' + (remaining === 1 ? '' : 's') + ' not tried yet. Many lead to screens already captured, so the next run captures fewer new screens than that. To try them, run the agent again before ' + whenUtc(job.expires) +
-      ' with the same environment address and sign-in, leave Pages blank, and paste this link into **Continue From**:', '',
-      '**Continue link:** ' + job.library.library_url, '',
-      'The next run\'s download has every screenshot from this run and the next.', '');
+    md.push('**To capture more:** paste this link into **Continue From** and run the agent again within 24 hours (by ' + when + ').', '',
+      '`' + job.library.library_url + '`', '');
+  }
+  md.push('**Download:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + '): ' + plural(rows.length, 'screenshot', 'screenshots') +
+    (earlier ? ' from all runs. Replaces any earlier download.' : ''), '');
+  if (pdf) md.push('**Catalog:** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): each screenshot with its name and description', '');
+  md.push('Download within 24 hours (by ' + when + ').', '',
+    '**Next steps**', '',
+    '1. Unzip and upload the folder to a public link: a GitHub folder, a web folder, or a file listing the image links. The Storyboard and Lab Guide Developer uses this link to embed the screenshots, so share it with everyone building courses on this product.',
+    '2. Change the sandbox password.', '');
+  const notes = [];
+  if (notCaptured.length) notes.push(plural(notCaptured.length, 'page', 'pages') + ' not captured');
+  if (errorPages) notes.push(plural(errorPages, 'error page', 'error pages') + ' not kept');
+  if (toCheck) notes.push(plural(toCheck, 'screenshot', 'screenshots') + ' to check');
+  if (missing) notes.push(plural(missing, 'description', 'descriptions') + ' not written (the screen name is used)');
+  if (notes.length) {
+    const list = notes.length > 1 ? notes.slice(0, -1).join(', ') + ' and ' + notes[notes.length - 1] : notes[0];
+    md.push(list.charAt(0).toUpperCase() + list.slice(1) + '. ' + (pdf ? 'Details are at the end of the PDF.' : 'Details are below.'), '');
   }
   if (!pdf) {
     // No catalog: the screenshots and the report go on the screen instead.
