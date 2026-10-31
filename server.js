@@ -1,6 +1,10 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.7.1 (October 2026)
+ * AaGeJa Capture Service — v1.7.2 (October 2026)
+ *
+ * v1.7.2 — the report names the clicking choice as the form does
+ *   - "How the capture went" said Choose "Also open buttons and dialogs"; the
+ *     form's choice is "Buttons and dialogs". Nothing else changes.
  *
  * v1.7.1 — a page's area is never the menu's own name
  *   - Cornerstone labels its whole menu "Navigation Menu", and 1.7.0 took that
@@ -277,7 +281,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.7.1';
+const VERSION = '1.7.2';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
@@ -417,7 +421,7 @@ function walkMd(job) {
   out.push('');
   if (w.level === 'all' && Object.keys(w.pressed).length) out.push('**Buttons pressed that change data:** ' + listOf(w.pressed, 30), '');
   const rows = [];
-  if (w.level === 'links') rows.push('- **Buttons and dialogs:** not opened. Choose "Also open buttons and dialogs" to capture them.');
+  if (w.level === 'links') rows.push('- **Buttons and dialogs:** not opened. Choose "Buttons and dialogs" to capture them.');
   if (Object.keys(w.confirmed || {}).length) out.push('**Opened only far enough to capture the box they show, then canceled:** ' + listOf(w.confirmed, 30) + '. Nothing these buttons sent reached the site.', '');
   if (w.level !== 'all' && Object.keys(w.change).length) rows.push('- **Would change data, so not pressed:** ' + listOf(w.change) + '. Choose "Also press buttons that change data" to include them.');
   if (Object.keys(w.never).length) rows.push('- **Never pressed:** ' + listOf(w.never) + '. Signing out, paying and acting as another user are never done.');
