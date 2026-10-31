@@ -27,7 +27,8 @@
  *      expands, inside an element whose class, id or label says filter).
  *   9. Every control also carries pressed (its aria-pressed): a toggle.
  *  10. A link or button in a menu also carries section: the label of the
- *      submenu it sits in ("Learning" for Learning > Training Plans).
+ *      submenu it sits in ("Learning" for Learning > Training Plans), the
+ *      outermost one, never the menu's own name ("Navigation Menu").
  * Everything else (the classes, the locator order, breadth, counts) is the
  * skill's own.
  *
@@ -138,9 +139,14 @@ function discoverControls(opts) {
     while (node && node !== document.body && node !== document.documentElement) {
       if (node.matches(MENU_BOX)) {
         let head = "";
+        // The menu's own top list may be labelled with the menu's name
+        // (Cornerstone: "Navigation Menu"). That names the menu, not an area:
+        // a list's own label counts only when it sits inside another list.
+        const outer = node.parentElement && node.parentElement.closest(MENU_BOX);
+        const nested = !!(outer && !outer.matches(NAV) && node.closest(NAV) && outer.closest(NAV) === node.closest(NAV));
         const lb = node.getAttribute("aria-labelledby");
-        if (lb) head = txt(document.getElementById(lb.split(/\s+/)[0]));
-        if (!head && node.getAttribute("aria-label") && node.parentElement && node.parentElement.closest(MENU_BOX)) head = txt(node);
+        if (lb && nested) head = txt(document.getElementById(lb.split(/\s+/)[0]) || node);
+        if (!head && nested && node.getAttribute("aria-label")) head = txt(node);
         if (!head) {
           let p = node.previousElementSibling;
           while (p && !txt(p)) p = p.previousElementSibling;

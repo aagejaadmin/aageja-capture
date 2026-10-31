@@ -1,6 +1,13 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.7.0 (October 2026)
+ * AaGeJa Capture Service — v1.7.1 (October 2026)
+ *
+ * v1.7.1 — a page's area is never the menu's own name
+ *   - Cornerstone labels its whole menu "Navigation Menu", and 1.7.0 took that
+ *     as the area of 86 of 100 pages. A list's own label now counts only
+ *     when the list sits inside another list of the same menu; the area is
+ *     the submenu the page sits in (Learning, Performance, Admin...).
+ *     Checked on Cornerstone's live menu: 127 menu links in 17 areas.
  *
  * v1.7.0 — captures run side by side; libraries survive a redeploy
  *   - Up to CAPTURE_CONCURRENCY captures (default 10) run at the same time,
@@ -270,7 +277,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.7.0';
+const VERSION = '1.7.1';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
