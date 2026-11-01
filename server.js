@@ -1,6 +1,18 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.8.0 (November 2026)
+ * AaGeJa Capture Service — v1.8.1 (November 2026)
+ *
+ * v1.8.1 — clicks reach controls on pages that redraw around them
+ *   - The walk clicks the element it found, handed back by the same control
+ *     list (discover_controls.js pick), instead of finding it again by its
+ *     CSS path. On the first real run of 1.8.0 every side-menu group and the
+ *     home page's tabs timed out ("locator.evaluate: Timeout"): the path no
+ *     longer matched by the time of the click. If the element was replaced,
+ *     the control is found once more and clicked. The probe's Cancel works
+ *     the same way.
+ *   - The loading check ignores a loading sign inside a faded-out overlay
+ *     (an ancestor at opacity 0): every screenshot of the first run was
+ *     reported as "still loading after 12 seconds" because of one.
  *
  * v1.8.0 — start at the URL entered; screens inside web components
  *   - The URL entered is where the capture starts. A URL that is the site's
@@ -325,7 +337,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.8.0';
+const VERSION = '1.8.1';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';

@@ -352,10 +352,13 @@ async function waitForQuiet(page, maxMs = 12000) {
       const tokens = (el.getAttribute('class') || '').split(/\s+/);
       return tokens.some((t) => WORD.test(t)) && !tokens.some((t) => DONE.test(t));
     };
+    // A loading sign inside a faded-out overlay (an ancestor at opacity 0) is not seen.
+    const up = (e) => e.parentElement || (e.parentNode && e.parentNode.host) || null;
+    const faded = (el) => { for (let x = up(el); x; x = up(x)) if (Number(getComputedStyle(x).opacity) <= 0.05) return true; return false; };
     const vis = (el) => {
       const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
       return r.width > 4 && r.height > 4 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05 &&
-        r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+        r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth && !faded(el);
     };
     // Inside open shadow roots (web components) too.
     const all = [];
@@ -1109,7 +1112,12 @@ async function runCapture(job, creds, outDir) {
           const cands = ((await f.evaluate(discoverControls, { dialogOnly: true }).catch(() => null)) || { controls: [] }).controls;
           const c = cands.find((x) => !x.hidden && x.sel === a.sel && x.label === a.label) ||
             cands.find((x) => !x.hidden && x.label === a.label && x.kind === a.kind);
-          if (c) return { c, loc: f.locator(c.sel).first() };
+          if (!c) continue;
+          // The element itself, not its CSS path: a page that inserts or moves
+          // elements beside it (a tooltip on hover) cannot make the path miss.
+          const h = await f.evaluateHandle(discoverControls, { dialogOnly: true, pick: { sel: c.sel, label: c.label, kind: c.kind } }).catch(() => null);
+          const el = h && h.asElement();
+          return { c, loc: el || f.locator(c.sel).first() };
         }
         return null;
       };
@@ -1155,7 +1163,16 @@ async function runCapture(job, creds, outDir) {
               // starts reaches the site, before or after its box is captured.
               if (probing) state.probe = true;
               state.acceptDialogs = pressing && level === 'all';
-              try { await safeClick(found.loc); await settle(page); } finally { state.acceptDialogs = false; }
+              try {
+                try { await safeClick(found.loc); }
+                catch (e) {
+                  // The page drew the control again (the element was replaced): find it once more.
+                  const again = await findAction(a);
+                  if (!again || W.classify(again.c) !== cls) throw e;
+                  await safeClick(again.loc);
+                }
+                await settle(page);
+              } finally { state.acceptDialogs = false; }
             }
             await note('clicked "' + masker(a.label || a.step) + '"');
             if (popup) throw new Skip('window', a.label || a.step);
@@ -1203,7 +1220,8 @@ async function runCapture(job, creds, outDir) {
         // Cancel, never confirm.
         const found = (await page.mainFrame().evaluate(discoverControls, { dialogOnly: true }).catch(() => null)) || { controls: [] };
         const cancel = found.controls.find((c) => /^(cancel|no|close|dismiss|keep|go back|×|✕|✖|x)$/i.test(c.label || ''));
-        if (cancel) await safeClick(page.locator(cancel.sel).first()).catch(() => {});
+        const cancelEl = cancel ? await page.mainFrame().evaluateHandle(discoverControls, { dialogOnly: true, pick: { sel: cancel.sel, label: cancel.label, kind: cancel.kind } }).then((h) => h.asElement()).catch(() => null) : null;
+        if (cancel) await safeClick(cancelEl || page.locator(cancel.sel).first()).catch(() => {});
         else await page.keyboard.press('Escape').catch(() => {});
         await page.waitForTimeout(500);
       };

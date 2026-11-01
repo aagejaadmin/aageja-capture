@@ -38,6 +38,11 @@
  *      carries group: true.
  *  13. A dialog counts as open only when it is on screen: a side panel kept
  *      off to the right of the page is not open.
+ *  14. With opts.pick ({ sel, label, kind }), the element itself is returned
+ *      instead of the list: the control with that sel and label, else the
+ *      first with that label and kind. The walk clicks the element it was
+ *      handed, so a page that adds or moves elements around it (a tooltip on
+ *      hover) cannot send the click elsewhere or leave it with nothing.
  * Everything else (the classes, the locator order, breadth, counts) is the
  * skill's own.
  *
@@ -224,6 +229,7 @@ function discoverControls(opts) {
 
   const seen = new Set();
   const controls = [];
+  const elements = []; // ADDITION 14: the element behind each control
   qsa(SEL).forEach((el) => {
     if (!vis(el)) return;
     if (topDialog && !within(topDialog, el)) return; // ADDITION 4
@@ -241,6 +247,7 @@ function discoverControls(opts) {
       locator: locator(el),
       ...extra(el, false), // ADDITION 2
     });
+    elements.push(el);
   });
 
   // ── ADDITION 3: links hidden in menus that open on hover ──
@@ -252,7 +259,16 @@ function discoverControls(opts) {
       if (!x.href || seen.has("hidden|" + x.href)) return;
       seen.add("hidden|" + x.href);
       controls.push({ tag: "A", label: txt(a), controlClass: "nav-link", inRow: false, inDialog: false, locator: locator(a), ...x });
+      elements.push(a);
     });
+  }
+
+  // ── ADDITION 14: hand back one element ──
+  if (opts.pick) {
+    const p = opts.pick;
+    let i = controls.findIndex((c) => !c.hidden && c.sel === p.sel && c.label === p.label);
+    if (i < 0) i = controls.findIndex((c) => !c.hidden && c.label === p.label && c.kind === p.kind);
+    return i < 0 ? null : elements[i];
   }
 
   const nav = qsa("a[href]").filter((a) => closest(a, "nav,[role=navigation],aside"))
