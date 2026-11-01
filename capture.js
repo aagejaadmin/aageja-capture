@@ -341,12 +341,23 @@ async function waitForQuiet(page, maxMs = 12000) {
       return r.width > 4 && r.height > 4 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05 &&
         r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
     };
+    // Inside open shadow roots (web components) too.
+    const all = [];
+    const roots = [];
+    const visit = (p) => { for (const el of p.children) { all.push(el); if (el.shadowRoot) { roots.push(el.shadowRoot); visit(el.shadowRoot); } visit(el); } };
+    visit(document);
     let busy = 0;
-    for (const el of document.querySelectorAll(SEL)) {
+    for (const el of all) {
+      if (!el.matches(SEL)) continue;
       if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.tagName === 'IMG') continue;
       if (loaderClass(el) && vis(el)) busy++;
     }
-    return { busy, text: (document.body ? document.body.innerText : '').length };
+    let text = (document.body ? document.body.innerText : '').length;
+    for (const r of roots) {
+      const tw = document.createTreeWalker(r, NodeFilter.SHOW_TEXT);
+      while (tw.nextNode()) { const p = tw.currentNode.parentElement; if (!p || !/^(SCRIPT|STYLE|NOSCRIPT)$/.test(p.tagName)) text += tw.currentNode.nodeValue.trim().length; }
+    }
+    return { busy, text };
   };
   const sample = async () => {
     let busy = 0, text = 0;
@@ -419,6 +430,18 @@ function maskInPage(words) {
  * description is of the dialog and not the page behind it.
  */
 function factsInPage(arg) {
+  // Inside open shadow roots (web components) too; on a page with none, every
+  // result is the same as a plain query.
+  const below = (node) => {
+    const out = [];
+    const visit = (p) => { for (const el of p.children) { out.push(el); if (el.shadowRoot) visit(el.shadowRoot); visit(el); } };
+    visit(node);
+    return out;
+  };
+  const qsa = (sel, scope) => below(scope || document).filter((e) => e.matches(sel));
+  const up = (e) => e.parentElement || (e.parentNode && e.parentNode.host) || null;
+  const closest = (e, sel) => { for (let x = e; x; x = up(x)) if (x.matches(sel)) return x; return null; };
+  const within = (a, e) => { for (let x = up(e); x; x = up(x)) if (x === a) return true; return false; };
   const vis = (el) => {
     const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none' &&
@@ -438,9 +461,8 @@ function factsInPage(arg) {
     return true;
   };
   const DLG = '[role=dialog], [role=alertdialog], dialog[open], [aria-modal="true"], .modal.show, .modal.in, .ui-dialog, .k-window, .ReactModal__Content';
-  const top = arg && arg.dialog ? [...document.querySelectorAll(DLG)].filter(vis).pop() || null : null;
-  const root = top || document;
-  const all = (sel) => [...root.querySelectorAll(sel)].filter(vis);
+  const top = arg && arg.dialog ? qsa(DLG).filter(vis).pop() || null : null;
+  const all = (sel) => qsa(sel, top).filter(vis);
   const kind = (el) => {
     const role = el.getAttribute('role');
     if (role) return role;
@@ -454,21 +476,31 @@ function factsInPage(arg) {
     if (el.labels && el.labels[0]) return txt(el.labels[0]);
     return el.getAttribute('aria-label') || el.getAttribute('placeholder') || el.name || '';
   };
-  const active = document.querySelector('[aria-current="page"], [aria-current="true"], nav .active, nav .on, nav .selected, [role=navigation] .active, [role=navigation] [aria-selected="true"]');
+  // The first, in document order, of: the current page's item, or an item
+  // marked active, on or selected inside the navigation.
+  const active = qsa('[aria-current="page"], [aria-current="true"], .active, .on, .selected, [aria-selected="true"]').find((e) =>
+    e.matches('[aria-current="page"], [aria-current="true"]') ||
+    (e.matches('.active, .on, .selected') && up(e) && closest(up(e), 'nav')) ||
+    (e.matches('.active, [aria-selected="true"]') && up(e) && closest(up(e), '[role=navigation]'))) || null;
   const CHROME = 'nav, header, aside, footer, [role=navigation], [role=banner], [role=contentinfo], [role=complementary]';
-  const inChrome = (el) => !!el.closest(CHROME);
+  const inChrome = (el) => !!closest(el, CHROME);
   const ctl = all('button, [role=button], a[href], [role=tab], [role=menuitem], input:not([type=hidden]), select, textarea, .btn, [onclick]')
-    .filter((el, i, arr) => !arr.some((o) => o !== el && o.contains(el)));
+    .filter((el, i, arr) => !arr.some((o) => o !== el && within(o, el)));
   const label = (el) => { const name = /^(INPUT|SELECT|TEXTAREA)$/.test(el.tagName) ? fieldName(el) : txt(el); return name ? kind(el) + ': ' + String(name).slice(0, 60) : ''; };
   // Controls in the page body first, then navigation and header controls.
   const controls = ctl.filter((el) => !inChrome(el)).map(label).concat(ctl.filter(inChrome).map(label));
   // Text in the page body inside the viewport, to tell a loaded page from an empty one.
   let bodyText = 0;
-  const tw = document.createTreeWalker(top || document.body || document.documentElement, NodeFilter.SHOW_TEXT);
-  while (tw.nextNode()) {
-    const p = tw.currentNode.parentElement;
-    if (!p || inChrome(p) || /^(SCRIPT|STYLE|NOSCRIPT)$/.test(p.tagName) || !vis(p)) continue;
-    bodyText += tw.currentNode.nodeValue.replace(/\s+/g, '').length;
+  const textRoot = top || document.body || document.documentElement;
+  // The page's own text first, then each shadow root's.
+  for (const r of [textRoot].concat(below(textRoot).filter((e) => e.shadowRoot).map((e) => e.shadowRoot))) {
+    const tw = document.createTreeWalker(r, NodeFilter.SHOW_TEXT);
+    while (tw.nextNode()) {
+      const p = tw.currentNode.parentElement;
+      if (!p || inChrome(p) || /^(SCRIPT|STYLE|NOSCRIPT)$/.test(p.tagName) || !vis(p)) continue;
+      bodyText += tw.currentNode.nodeValue.replace(/\s+/g, '').length;
+      if (bodyText > 200) break;
+    }
     if (bodyText > 200) break;
   }
   // The biggest bold text in the top half of the screen, outside the site's
@@ -477,9 +509,9 @@ function factsInPage(arg) {
   let big = '';
   if (!top && document.body) {
     let best = 0, bestTop = Infinity;
-    for (const el of document.body.querySelectorAll('div, span, p, strong, b, label, legend, td')) {
+    for (const el of qsa('div, span, p, strong, b, label, legend, td', document.body)) {
       const own = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.nodeValue).join(' ').replace(/\s+/g, ' ').trim();
-      if (own.length < 3 || own.length > 60 || inChrome(el) || el.closest('a, button, [role=button], [role=link], [role=tab], [role=menuitem]')) continue;
+      if (own.length < 3 || own.length > 60 || inChrome(el) || closest(el, 'a, button, [role=button], [role=link], [role=tab], [role=menuitem]')) continue;
       const r = el.getBoundingClientRect();
       if (r.top < 0 || r.top > innerHeight / 2 || !seen(el)) continue;
       const cs = getComputedStyle(el);
@@ -766,11 +798,13 @@ async function runCapture(job, creds, outDir) {
 
     job.stage = 'signing in';
     const hasCreds = !!(creds.username || creds.password);
+    let opened = '';
     try {
       await acting(async () => {
         await page.goto(job.environment_url, { waitUntil: 'domcontentloaded', timeout: 45000 });
         await settle(page);
       });
+      opened = page.url();
       await note('opened environment');
       if (hasCreds) await signInUnguarded();
       else if (await onSignInPage(page)) {
@@ -781,11 +815,64 @@ async function runCapture(job, creds, outDir) {
       job.debug_image = await debugShot();
       throw e;
     }
-    const home = page.url();
+    let home = page.url();
     allowedHosts.add(new URL(home).host);
     if (job.resume) for (const h of job.resume.hosts || []) allowedHosts.add(h);
     await note('signed in');
     state.guard = true;
+
+    // Where the capture starts. The site's root address or its sign-in page
+    // (the sign-in form was at the address itself, or the address is named
+    // like one) means the page reached after sign-in, as before. Any other
+    // address is a page inside the product (the site sent the browser
+    // elsewhere to sign in, or no sign-in was needed): it is opened after
+    // sign-in, and with no pages listed only addresses under its folder are
+    // captured (scope), if it opened there.
+    const pathKey = (u) => { try { const x = new URL(u); return x.host.toLowerCase() + x.pathname.replace(/\/+$/, '').toLowerCase(); } catch (_) { return ''; } };
+    const entered = new URL(job.environment_url);
+    const atRoot = entered.pathname.replace(/\/+$/, '') === '';
+    const signInHere = (hasCreds && pathKey(opened) === pathKey(entered.href)) ||
+      /(^|[/_.-])(log-?in|log-?on|sign-?in|sign-?on|sso|auth)([/_.-]|$)/i.test(entered.pathname);
+    const startHere = !atRoot && !signInHere && !job.resume;
+    if (startHere && pathKey(home) !== pathKey(entered.href)) {
+      const openEntered = () => acting(async () => {
+        await page.goto(entered.href, { waitUntil: 'domcontentloaded', timeout: 45000 });
+        await settle(page);
+      });
+      try {
+        await openEntered();
+        if (hasCreds && (await onSignInPage(page))) {
+          await signInUnguarded();
+          await openEntered();
+        }
+      } catch (e) {
+        if (e instanceof CaptureError) throw e;
+        throw new CaptureError('After sign-in, the URL you entered did not open. Check that it opens in a browser once you are signed in.');
+      }
+      if (hasCreds && (await onSignInPage(page))) throw new CaptureError('After sign-in, the URL you entered showed the sign-in page again. Check that it opens in a browser once you are signed in.');
+      await note('opened the URL entered');
+      home = page.url();
+      allowedHosts.add(new URL(home).host);
+    }
+    // The folder of the URL entered: /app/x/ for /app/x/home, and
+    // /reports/ for /reports when it opened /reports/overview. The root is no
+    // limit. A run that continues an earlier one keeps that run's folder.
+    // A URL that opened somewhere else (the site sent it on to its home page)
+    // is no limit.
+    let scope = job.resume ? (job.resume.scope || null) : null;
+    if (startHere && !job.targets.length) {
+      const ep = entered.pathname;
+      const hp = new URL(home).pathname;
+      const dir = ep.endsWith('/') ? ep
+        : hp.toLowerCase().startsWith(ep.toLowerCase() + '/') ? ep + '/'
+        : ep.slice(0, ep.lastIndexOf('/') + 1);
+      const there = new URL(home).host.toLowerCase() === entered.host.toLowerCase() && hp.toLowerCase().startsWith(dir.toLowerCase());
+      if (dir && dir !== '/' && there) scope = { host: new URL(home).host, path: dir };
+    }
+    const inScope = (u) => {
+      if (!scope) return true;
+      try { const x = new URL(u); return x.host === scope.host && x.pathname.toLowerCase().startsWith(scope.path.toLowerCase()); } catch (_) { return false; }
+    };
     // The site's own words in every tab title ("Welcome - Realize Your
     // Potential: Cornerstone University"): a page whose title is only these
     // is named by what it shows instead.
@@ -935,6 +1022,7 @@ async function runCapture(job, creds, outDir) {
       job.walk = {
         level, mode: followLinks ? 'walk' : 'list', stopped: '', tried: 0, nochange: 0, gone: 0, failed: 0, left: 0,
         unnamed: 0, downloads: 0, same: 0, browse: 0, repeats: {}, errors: {}, never: {}, change: {}, confirmed: {}, window: {}, site: {}, pressed: {},
+        scope: scope ? scope.path : '', outside: 0,
       };
       await walkFrom(seeds, followLinks);
     }
@@ -965,6 +1053,8 @@ async function runCapture(job, creds, outDir) {
       const seenPat = new Set(R.seenPat || []);
       const keys = new Set(R.keys || []);
       const downloads = new Set(R.downloads || []);
+      // Addresses outside the folder of the URL entered, each kind once.
+      const outside = new Set();
       const q1 = [];
       const q2 = [];
       for (const s of seeds) q1.push(s);
@@ -1022,6 +1112,7 @@ async function runCapture(job, creds, outDir) {
           if (await onSignInPage(page)) throw new CaptureError('The site showed its sign-in page again after signing in. The session could not be kept.');
         }
         if (!allowedHosts.has(new URL(page.url()).host)) throw new Skip('site', st.trail[st.trail.length - 1]);
+        if (!st.home && !inScope(page.url())) throw new Skip('outside', page.url());
         if (!st.actions.length) return;
         await acting(async () => {
           await cleanPage(page, size, false);
@@ -1048,6 +1139,7 @@ async function runCapture(job, creds, outDir) {
             await note('clicked "' + masker(a.label || a.step) + '"');
             if (popup) throw new Skip('window', a.label || a.step);
             if (!allowedHosts.has(new URL(page.url()).host)) throw new Skip('site', a.label || a.step);
+            if (!inScope(page.url())) throw new Skip('outside', page.url());
           }
         });
       };
@@ -1126,7 +1218,22 @@ async function runCapture(job, creds, outDir) {
         if (st.capture !== false) {
           const texts = [await page.title().catch(() => '')];
           for (const f of page.frames()) {
-            texts.push(await f.evaluate(() => (document.body ? document.body.innerText : '').replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 20000)).catch(() => ''));
+            texts.push(await f.evaluate(() => {
+              let t = document.body ? document.body.innerText : '';
+              // The text inside open shadow roots (web components), when there are any.
+              const visit = (p) => {
+                for (const el of p.children) {
+                  if (el.shadowRoot) {
+                    const tw = document.createTreeWalker(el.shadowRoot, NodeFilter.SHOW_TEXT);
+                    while (tw.nextNode()) { const q = tw.currentNode.parentElement; if (!q || !/^(SCRIPT|STYLE|NOSCRIPT)$/.test(q.tagName)) t += ' ' + tw.currentNode.nodeValue; }
+                    visit(el.shadowRoot);
+                  }
+                  visit(el);
+                }
+              };
+              visit(document);
+              return t.replace(/\d+/g, '#').replace(/\s+/g, ' ').trim().slice(0, 20000);
+            }).catch(() => ''));
           }
           same = hash(s.sig + '#' + texts.join('#'));
           if (seenSig.has(same)) { w.same++; return; }
@@ -1229,6 +1336,7 @@ async function runCapture(job, creds, outDir) {
             try { h = new URL(c.href); } catch (_) { continue; }
             if (!/^https?:$/.test(h.protocol)) continue;
             if (!allowedHosts.has(h.host)) { if (!c.hidden) tally(w.site, c.label); continue; }
+            if (!inScope(h.href)) { outside.add(W.urlPattern(h.href).pattern); continue; }
             const p = W.urlPattern(c.href).pattern;
             if (seenPat.has(p)) continue;
             seenPat.add(p);
@@ -1272,6 +1380,7 @@ async function runCapture(job, creds, outDir) {
           if (e instanceof Skip) {
             if (e.why === 'window') tally(w.window, e.label);
             else if (e.why === 'site') tally(w.site, e.label);
+            else if (e.why === 'outside') outside.add(W.urlPattern(e.label).pattern);
             else w.gone++;
           } else if (e.userMessage && /could not be kept/.test(e.userMessage)) {
             w.stopped = 'session';
@@ -1293,10 +1402,11 @@ async function runCapture(job, creds, outDir) {
       }
       w.left = pending();
       w.downloads = downloads.size;
+      w.outside = outside.size;
       // What a later run needs to carry on from here, kept with the job for its 24 hours.
       job.walkState = pending() ? {
         level, q1, q2, seenFp: [...seenFp], seenPat: [...seenPat], seenSig: [...seenSig], keys: [...keys], downloads: [...downloads],
-        used: [...used], hosts: [...allowedHosts],
+        used: [...used], hosts: [...allowedHosts], scope,
       } : null;
       progress();
       job.progress.current = '';

@@ -1,6 +1,31 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.7.2 (October 2026)
+ * AaGeJa Capture Service — v1.8.0 (November 2026)
+ *
+ * v1.8.0 — start at the URL entered; screens inside web components
+ *   - The URL entered is where the capture starts. A URL that is the site's
+ *     root, or its sign-in page (the sign-in form is at that address, or the
+ *     address is named login, sign-in, sso or auth), means the page reached
+ *     after sign-in, as before. Any other URL (the site sent the browser
+ *     elsewhere to sign in, or no sign-in was needed) is opened again after
+ *     sign-in. A site that sends the user to its own home page after sign-in
+ *     no longer decides where the capture starts. Listed menu paths start from that page too.
+ *   - With no pages listed, a capture that starts at the URL entered takes
+ *     only addresses under its folder: /app/x/ for /app/x/home. Links
+ *     outside it are not followed, and a click that leads outside it is not
+ *     captured; the report counts them. A URL that opened somewhere else (the
+ *     site sent it on) is no limit. A Continue run keeps the first run's
+ *     folder.
+ *   - Web components: the walk's control list (discover_controls.js), the
+ *     screen's name, headings, labels and controls (factsInPage), what tells
+ *     screens apart (walk.js stateInPage, the same-content check) and the
+ *     loading check also look inside open shadow roots. A control inside one
+ *     is clicked again by a CSS path through each host ("host > child"),
+ *     which Playwright follows. On a page with no shadow roots every result
+ *     is the same as in 1.7.2.
+ *   - In the navigation, a control that opens a group of menu items
+ *     (data-has-children) opens the menu like a menu button, so Menus and
+ *     links opens a side menu's groups to find their pages.
  *
  * v1.7.2 — the report names the clicking choice as the form does
  *   - "How the capture went" said Choose "Also open buttons and dialogs"; the
@@ -281,7 +306,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.7.2';
+const VERSION = '1.8.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
@@ -409,8 +434,9 @@ function walkMd(job) {
   if (!w) return '';
   const n = job.screens.length;
   const out = ['**How the capture went through the product**', ''];
-  out.push((job.resume ? 'Carrying on from the earlier run, with its clicking choice, it ' : w.mode === 'walk' ? 'Starting from the page after sign-in, it ' : 'On each page you listed, it ') + LEVEL_WORDS[w.level] +
-    '. ' + n + ' screenshot' + (n === 1 ? '' : 's') + ' taken' + (job.resume ? ' in this run' : '') + '.');
+  out.push((job.resume ? 'Carrying on from the earlier run, with its clicking choice, it ' : w.mode === 'walk' ? (w.scope ? 'Starting from the URL you entered, it ' : 'Starting from the page after sign-in, it ') : 'On each page you listed, it ') + LEVEL_WORDS[w.level] +
+    '. ' + (w.scope ? 'It captured only addresses under ' + w.scope + ', the folder of the URL you entered. ' : '') +
+    n + ' screenshot' + (n === 1 ? '' : 's') + ' taken' + (job.resume ? ' in this run' : '') + '.');
   const left = w.left ? ' ' + w.left + ' link' + (w.left === 1 ? '' : 's') + ' and button' + (w.left === 1 ? '' : 's') + ' it found were not tried yet; many lead to screens already captured.' +
     (w.mode === 'walk' ? ' To try them, run again with the Continue link in Continue From.' : '') : '';
   if (w.stopped === 'limit') out.push('', 'It stopped at the limit of ' + MAX_SCREENS + ' screenshots a run.' + left);
@@ -427,6 +453,7 @@ function walkMd(job) {
   if (Object.keys(w.never).length) rows.push('- **Never pressed:** ' + listOf(w.never) + '. Signing out, paying and acting as another user are never done.');
   if (Object.keys(w.window).length) rows.push('- **Open a new window, so not followed:** ' + listOf(w.window));
   if (Object.keys(w.site).length) rows.push('- **On another site, so not followed:** ' + listOf(w.site));
+  if (w.outside) rows.push('- **Outside ' + mdCell(w.scope) + ', so not followed:** ' + w.outside + ' address' + (w.outside === 1 ? '' : 'es'));
   if (w.browse) rows.push('- **Sorting, paging, carousel and calendar controls, not clicked (they show the same screen):** ' + w.browse);
   const reps = Object.entries(w.repeats || {}).sort((a, b) => b[1] - a[1]);
   if (reps.length) rows.push('- **The same button on each item of a list, opened for the first item only:** ' + reps.slice(0, 12).map(([k, n]) => mdCell(k) + ' (' + n + ' more)').join(', ') + (reps.length > 12 ? ', and ' + (reps.length - 12) + ' more' : ''));
