@@ -38,6 +38,12 @@
  *      carries group: true.
  *  13. A dialog counts as open only when it is on screen: a side panel kept
  *      off to the right of the page is not open.
+ *  14. sel uses an element's id attribute, never its id property. A web
+ *      component can have an id property with no attribute (ServiceNow's
+ *      <aiux-nav-sidebar> answers "aiux-nav-sidebar-3" with no id
+ *      attribute), and a path starting at "#aiux-nav-sidebar-3" matches
+ *      nothing. On plain HTML pages the two are the same, except a form
+ *      holding a field named "id" (its id property is that field).
  * Everything else (the classes, the locator order, breadth, counts) is the
  * skill's own.
  *
@@ -113,14 +119,16 @@ function discoverControls(opts) {
   // so it is not navigation; its links are still found when hidden (ADDITION 3).
   const NAV = "nav, header, aside, [role=navigation], [role=menubar], [role=banner]";
   // An id counts only when it is used once, shadow roots included (ADDITION 11).
+  // The id attribute, which is what CSS matches (ADDITION 14).
   const ids = new Map();
-  for (const e of ALL) if (e.id) ids.set(e.id, (ids.get(e.id) || 0) + 1);
+  for (const e of ALL) { const id = e.getAttribute("id"); if (id) ids.set(id, (ids.get(id) || 0) + 1); }
   const idOk = (id) => /^[A-Za-z][\w-]*$/.test(id) && ids.get(id) === 1;
   const cssPath = (el) => {
     const parts = [];
     let e = el;
     while (e && e.nodeType === 1 && e !== document.documentElement) {
-      if (e.id && idOk(e.id)) { parts.unshift("#" + CSS.escape(e.id)); break; }
+      const aid = e.getAttribute("id"); // ADDITION 14
+      if (aid && idOk(aid)) { parts.unshift("#" + CSS.escape(aid)); break; }
       let p = e.tagName.toLowerCase();
       // A shadow root's top-level element: its siblings are the root's children (ADDITION 11).
       const parent = e.parentElement || e.parentNode;

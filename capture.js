@@ -352,10 +352,13 @@ async function waitForQuiet(page, maxMs = 12000) {
       const tokens = (el.getAttribute('class') || '').split(/\s+/);
       return tokens.some((t) => WORD.test(t)) && !tokens.some((t) => DONE.test(t));
     };
+    // A loading sign inside a faded-out overlay (an ancestor at opacity 0) is not seen.
+    const up = (e) => e.parentElement || (e.parentNode && e.parentNode.host) || null;
+    const faded = (el) => { for (let x = up(el); x; x = up(x)) if (Number(getComputedStyle(x).opacity) <= 0.05) return true; return false; };
     const vis = (el) => {
       const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
       return r.width > 4 && r.height > 4 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05 &&
-        r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth;
+        r.bottom > 0 && r.right > 0 && r.top < innerHeight && r.left < innerWidth && !faded(el);
     };
     // Inside open shadow roots (web components) too.
     const all = [];

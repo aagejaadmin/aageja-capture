@@ -1,6 +1,18 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.8.0 (November 2026)
+ * AaGeJa Capture Service — v1.8.1 (November 2026)
+ *
+ * v1.8.1 — controls inside ServiceNow's web components can be clicked
+ *   - A control's CSS path uses an element's id attribute, never its id
+ *     property (discover_controls.js, ADDITION 14). ServiceNow's components
+ *     answer an id property with no attribute ("aiux-nav-sidebar-3"), so on
+ *     the first real run of 1.8.0 the path to every side-menu group, the
+ *     home page's tabs and the user menu matched nothing, and each click
+ *     timed out ("locator.evaluate: Timeout"). Checked live on 1 Nov 2026:
+ *     90 such components on AI Control Tower's home page.
+ *   - The loading check ignores a loading sign inside a faded-out overlay
+ *     (an ancestor at opacity 0): every screenshot of the first run was
+ *     reported as "still loading after 12 seconds" because of one.
  *
  * v1.8.0 — start at the URL entered; screens inside web components
  *   - The URL entered is where the capture starts. A URL that is the site's
@@ -325,7 +337,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.8.0';
+const VERSION = '1.8.1';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
