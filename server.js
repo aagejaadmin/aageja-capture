@@ -2,14 +2,14 @@
 /**
  * AaGeJa Capture Service — v1.8.1 (November 2026)
  *
- * v1.8.1 — clicks reach controls on pages that redraw around them
- *   - The walk clicks the element it found, handed back by the same control
- *     list (discover_controls.js pick), instead of finding it again by its
- *     CSS path. On the first real run of 1.8.0 every side-menu group and the
- *     home page's tabs timed out ("locator.evaluate: Timeout"): the path no
- *     longer matched by the time of the click. If the element was replaced,
- *     the control is found once more and clicked. The probe's Cancel works
- *     the same way.
+ * v1.8.1 — controls inside ServiceNow's web components can be clicked
+ *   - A control's CSS path uses an element's id attribute, never its id
+ *     property (discover_controls.js, ADDITION 14). ServiceNow's components
+ *     answer an id property with no attribute ("aiux-nav-sidebar-3"), so on
+ *     the first real run of 1.8.0 the path to every side-menu group, the
+ *     home page's tabs and the user menu matched nothing, and each click
+ *     timed out ("locator.evaluate: Timeout"). Checked live on 1 Nov 2026:
+ *     90 such components on AI Control Tower's home page.
  *   - The loading check ignores a loading sign inside a faded-out overlay
  *     (an ancestor at opacity 0): every screenshot of the first run was
  *     reported as "still loading after 12 seconds" because of one.

@@ -38,11 +38,12 @@
  *      carries group: true.
  *  13. A dialog counts as open only when it is on screen: a side panel kept
  *      off to the right of the page is not open.
- *  14. With opts.pick ({ sel, label, kind }), the element itself is returned
- *      instead of the list: the control with that sel and label, else the
- *      first with that label and kind. The walk clicks the element it was
- *      handed, so a page that adds or moves elements around it (a tooltip on
- *      hover) cannot send the click elsewhere or leave it with nothing.
+ *  14. sel uses an element's id attribute, never its id property. A web
+ *      component can have an id property with no attribute (ServiceNow's
+ *      <aiux-nav-sidebar> answers "aiux-nav-sidebar-3" with no id
+ *      attribute), and a path starting at "#aiux-nav-sidebar-3" matches
+ *      nothing. On plain HTML pages the two are the same, except a form
+ *      holding a field named "id" (its id property is that field).
  * Everything else (the classes, the locator order, breadth, counts) is the
  * skill's own.
  *
@@ -118,14 +119,16 @@ function discoverControls(opts) {
   // so it is not navigation; its links are still found when hidden (ADDITION 3).
   const NAV = "nav, header, aside, [role=navigation], [role=menubar], [role=banner]";
   // An id counts only when it is used once, shadow roots included (ADDITION 11).
+  // The id attribute, which is what CSS matches (ADDITION 14).
   const ids = new Map();
-  for (const e of ALL) if (e.id) ids.set(e.id, (ids.get(e.id) || 0) + 1);
+  for (const e of ALL) { const id = e.getAttribute("id"); if (id) ids.set(id, (ids.get(id) || 0) + 1); }
   const idOk = (id) => /^[A-Za-z][\w-]*$/.test(id) && ids.get(id) === 1;
   const cssPath = (el) => {
     const parts = [];
     let e = el;
     while (e && e.nodeType === 1 && e !== document.documentElement) {
-      if (e.id && idOk(e.id)) { parts.unshift("#" + CSS.escape(e.id)); break; }
+      const aid = e.getAttribute("id"); // ADDITION 14
+      if (aid && idOk(aid)) { parts.unshift("#" + CSS.escape(aid)); break; }
       let p = e.tagName.toLowerCase();
       // A shadow root's top-level element: its siblings are the root's children (ADDITION 11).
       const parent = e.parentElement || e.parentNode;
@@ -229,7 +232,6 @@ function discoverControls(opts) {
 
   const seen = new Set();
   const controls = [];
-  const elements = []; // ADDITION 14: the element behind each control
   qsa(SEL).forEach((el) => {
     if (!vis(el)) return;
     if (topDialog && !within(topDialog, el)) return; // ADDITION 4
@@ -247,7 +249,6 @@ function discoverControls(opts) {
       locator: locator(el),
       ...extra(el, false), // ADDITION 2
     });
-    elements.push(el);
   });
 
   // ── ADDITION 3: links hidden in menus that open on hover ──
@@ -259,16 +260,7 @@ function discoverControls(opts) {
       if (!x.href || seen.has("hidden|" + x.href)) return;
       seen.add("hidden|" + x.href);
       controls.push({ tag: "A", label: txt(a), controlClass: "nav-link", inRow: false, inDialog: false, locator: locator(a), ...x });
-      elements.push(a);
     });
-  }
-
-  // ── ADDITION 14: hand back one element ──
-  if (opts.pick) {
-    const p = opts.pick;
-    let i = controls.findIndex((c) => !c.hidden && c.sel === p.sel && c.label === p.label);
-    if (i < 0) i = controls.findIndex((c) => !c.hidden && c.label === p.label && c.kind === p.kind);
-    return i < 0 ? null : elements[i];
   }
 
   const nav = qsa("a[href]").filter((a) => closest(a, "nav,[role=navigation],aside"))

@@ -1112,12 +1112,7 @@ async function runCapture(job, creds, outDir) {
           const cands = ((await f.evaluate(discoverControls, { dialogOnly: true }).catch(() => null)) || { controls: [] }).controls;
           const c = cands.find((x) => !x.hidden && x.sel === a.sel && x.label === a.label) ||
             cands.find((x) => !x.hidden && x.label === a.label && x.kind === a.kind);
-          if (!c) continue;
-          // The element itself, not its CSS path: a page that inserts or moves
-          // elements beside it (a tooltip on hover) cannot make the path miss.
-          const h = await f.evaluateHandle(discoverControls, { dialogOnly: true, pick: { sel: c.sel, label: c.label, kind: c.kind } }).catch(() => null);
-          const el = h && h.asElement();
-          return { c, loc: el || f.locator(c.sel).first() };
+          if (c) return { c, loc: f.locator(c.sel).first() };
         }
         return null;
       };
@@ -1163,16 +1158,7 @@ async function runCapture(job, creds, outDir) {
               // starts reaches the site, before or after its box is captured.
               if (probing) state.probe = true;
               state.acceptDialogs = pressing && level === 'all';
-              try {
-                try { await safeClick(found.loc); }
-                catch (e) {
-                  // The page drew the control again (the element was replaced): find it once more.
-                  const again = await findAction(a);
-                  if (!again || W.classify(again.c) !== cls) throw e;
-                  await safeClick(again.loc);
-                }
-                await settle(page);
-              } finally { state.acceptDialogs = false; }
+              try { await safeClick(found.loc); await settle(page); } finally { state.acceptDialogs = false; }
             }
             await note('clicked "' + masker(a.label || a.step) + '"');
             if (popup) throw new Skip('window', a.label || a.step);
@@ -1220,8 +1206,7 @@ async function runCapture(job, creds, outDir) {
         // Cancel, never confirm.
         const found = (await page.mainFrame().evaluate(discoverControls, { dialogOnly: true }).catch(() => null)) || { controls: [] };
         const cancel = found.controls.find((c) => /^(cancel|no|close|dismiss|keep|go back|×|✕|✖|x)$/i.test(c.label || ''));
-        const cancelEl = cancel ? await page.mainFrame().evaluateHandle(discoverControls, { dialogOnly: true, pick: { sel: cancel.sel, label: cancel.label, kind: cancel.kind } }).then((h) => h.asElement()).catch(() => null) : null;
-        if (cancel) await safeClick(cancelEl || page.locator(cancel.sel).first()).catch(() => {});
+        if (cancel) await safeClick(page.locator(cancel.sel).first()).catch(() => {});
         else await page.keyboard.press('Escape').catch(() => {});
         await page.waitForTimeout(500);
       };
