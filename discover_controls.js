@@ -29,6 +29,15 @@
  *  10. A link or button in a menu also carries section: the label of the
  *      submenu it sits in ("Learning" for Learning > Training Plans), the
  *      outermost one, never the menu's own name ("Navigation Menu").
+ *  11. Web components: every query, closest() and contains() also looks
+ *      inside open shadow roots, in document order, and a control's sel runs
+ *      through each shadow root's host ("host > child"), which Playwright's
+ *      CSS follows. On a page with no shadow roots every result is the same
+ *      as before.
+ *  12. A control that opens a group of menu items (data-has-children) also
+ *      carries group: true.
+ *  13. A dialog counts as open only when it is on screen: a side panel kept
+ *      off to the right of the page is not open.
  * Everything else (the classes, the locator order, breadth, counts) is the
  * skill's own.
  *
@@ -36,6 +45,22 @@
  */
 function discoverControls(opts) {
   opts = opts || {};
+  // ── ADDITION 11: inside open shadow roots ──
+  // Elements in document order, each host followed by its shadow root's
+  // elements, then its own children.
+  const below = (node) => {
+    const out = [];
+    const visit = (p) => { for (const el of p.children) { out.push(el); if (el.shadowRoot) visit(el.shadowRoot); visit(el); } };
+    visit(node);
+    return out;
+  };
+  const ALL = below(document);
+  const qsa = (sel, scope) => (scope ? below(scope) : ALL).filter((e) => e.matches(sel));
+  // The parent, or a shadow root's host.
+  const up = (e) => e.parentElement || (e.parentNode && e.parentNode.host) || null;
+  const closest = (e, sel) => { for (let x = e; x; x = up(x)) if (x.matches(sel)) return x; return null; };
+  const within = (a, e) => { for (let x = e; x; x = up(x)) if (x === a) return true; return false; };
+  const byId = (node, id) => { const r = node.getRootNode(); return (r && r.getElementById ? r.getElementById(id) : null) || document.getElementById(id); };
   const vis = (el) => {
     const r = el.getBoundingClientRect();
     const s = getComputedStyle(el);
@@ -63,15 +88,15 @@ function discoverControls(opts) {
     const al = (el.getAttribute("aria-label") || "").toLowerCase();
     const tx = txt(el).toLowerCase();
     const hay = al + " " + tx;
-    if (role === "menuitem" || el.closest("[role=menu]")) return "overflow-item";
-    if (role === "tab" || el.closest("[role=tablist]")) return "tab";
+    if (role === "menuitem" || closest(el, "[role=menu]")) return "overflow-item";
+    if (role === "tab" || closest(el, "[role=tablist]")) return "tab";
     if (t === "SELECT" || role === "combobox" || el.getAttribute("aria-haspopup") === "listbox") return "dropdown";
     if (t === "DETAILS" || el.getAttribute("aria-expanded") !== null || /expand|collaps|chevron|show more|accordion/.test(hay)) return "expandable";
     if (el.getAttribute("aria-haspopup") === "menu" || /\bmore\b|options|kebab|overflow/.test(hay)) return "overflow-trigger";
-    if (/step/.test(role) || el.getAttribute("aria-current") === "step" || el.closest("[class*=step],[class*=wizard],[class*=stepper]")) return "wizard-step";
+    if (/step/.test(role) || el.getAttribute("aria-current") === "step" || closest(el, "[class*=step],[class*=wizard],[class*=stepper]")) return "wizard-step";
     if (t === "INPUT" || t === "TEXTAREA") return "form-field";
-    if (el.closest("tr,[role=row]")) return "row-action";
-    if (el.closest("[role=toolbar],header,.toolbar,.actions,.action-bar")) return "toolbar";
+    if (closest(el, "tr,[role=row]")) return "row-action";
+    if (closest(el, "[role=toolbar],header,.toolbar,.actions,.action-bar")) return "toolbar";
     return "primary";
   };
 
@@ -87,17 +112,22 @@ function discoverControls(opts) {
   // The site's navigation. A [role=menu] on the page (a ⋯ menu) holds actions,
   // so it is not navigation; its links are still found when hidden (ADDITION 3).
   const NAV = "nav, header, aside, [role=navigation], [role=menubar], [role=banner]";
-  const idOk = (id) => /^[A-Za-z][\w-]*$/.test(id) && document.querySelectorAll("#" + CSS.escape(id)).length === 1;
+  // An id counts only when it is used once, shadow roots included (ADDITION 11).
+  const ids = new Map();
+  for (const e of ALL) if (e.id) ids.set(e.id, (ids.get(e.id) || 0) + 1);
+  const idOk = (id) => /^[A-Za-z][\w-]*$/.test(id) && ids.get(id) === 1;
   const cssPath = (el) => {
     const parts = [];
     let e = el;
     while (e && e.nodeType === 1 && e !== document.documentElement) {
       if (e.id && idOk(e.id)) { parts.unshift("#" + CSS.escape(e.id)); break; }
       let p = e.tagName.toLowerCase();
-      const sib = e.parentElement ? [...e.parentElement.children].filter((c) => c.tagName === e.tagName) : [];
+      // A shadow root's top-level element: its siblings are the root's children (ADDITION 11).
+      const parent = e.parentElement || e.parentNode;
+      const sib = parent && parent.children ? [...parent.children].filter((c) => c.tagName === e.tagName) : [];
       if (sib.length > 1) p += ":nth-of-type(" + (sib.indexOf(e) + 1) + ")";
       parts.unshift(p);
-      e = e.parentElement;
+      e = up(e);
     }
     return parts.join(" > ");
   };
@@ -121,10 +151,10 @@ function discoverControls(opts) {
   // ADDITION 7: a column heading (not a row heading): role columnheader, a th
   // in a thead, a th with scope col, or a th in the table's first row.
   const colHead = (el) => {
-    const th = el.closest("th,[role=columnheader]");
-    if (!th || th.closest("[role=dialog]")) return false;
-    if (th.getAttribute("role") === "columnheader" || th.scope === "col" || th.closest("thead")) return true;
-    const table = th.closest("table");
+    const th = closest(el, "th,[role=columnheader]");
+    if (!th || closest(th, "[role=dialog]")) return false;
+    if (th.getAttribute("role") === "columnheader" || th.scope === "col" || closest(th, "thead")) return true;
+    const table = closest(th, "table");
     return !!(table && table.rows[0] && th.parentElement === table.rows[0]);
   };
   // ADDITION 10: the menu section a link sits in ("Learning" for Learning >
@@ -135,17 +165,17 @@ function discoverControls(opts) {
   const MENU_BOX = "ul, ol, [role=menu], [role=group], [class*=submenu i], [class*=sub-menu i], [class*=dropdown i], [class*=flyout i], [class*=menu i]";
   const sectionOf = (el) => {
     let label = "";
-    let node = el.parentElement;
+    let node = up(el);
     while (node && node !== document.body && node !== document.documentElement) {
       if (node.matches(MENU_BOX)) {
         let head = "";
         // The menu's own top list may be labelled with the menu's name
         // (Cornerstone: "Navigation Menu"). That names the menu, not an area:
         // a list's own label counts only when it sits inside another list.
-        const outer = node.parentElement && node.parentElement.closest(MENU_BOX);
-        const nested = !!(outer && !outer.matches(NAV) && node.closest(NAV) && outer.closest(NAV) === node.closest(NAV));
+        const outer = up(node) && closest(up(node), MENU_BOX);
+        const nested = !!(outer && !outer.matches(NAV) && closest(node, NAV) && closest(outer, NAV) === closest(node, NAV));
         const lb = node.getAttribute("aria-labelledby");
-        if (lb && nested) head = txt(document.getElementById(lb.split(/\s+/)[0]) || node);
+        if (lb && nested) head = txt(byId(node, lb.split(/\s+/)[0]) || node);
         if (!head && nested && node.getAttribute("aria-label")) head = txt(node);
         if (!head) {
           let p = node.previousElementSibling;
@@ -159,42 +189,44 @@ function discoverControls(opts) {
         if (head && head.length <= 40 && head !== txt(el)) label = head;
       }
       if (node.matches(NAV)) break;
-      node = node.parentElement;
+      node = up(node);
     }
     return label;
   };
   const extra = (el, hidden) => {
     const raw = el.tagName === "A" ? (el.getAttribute("href") || "") : "";
     // The site's navigation only: a ⋯ menu on a page is not an area.
-    const inMenu = !!el.closest(NAV);
+    const inMenu = !!closest(el, NAV);
     return {
       section: inMenu ? sectionOf(el) : "", // ADDITION 10
       sel: cssPath(el),
       href: raw && !/^\s*(javascript:|#|mailto:|tel:)/i.test(raw) ? el.href : "",
       kind: kindOf(el),
-      inNav: !!el.closest(NAV),
-      inForm: !!el.closest("form"),
+      inNav: !!closest(el, NAV),
+      inForm: !!closest(el, "form"),
       haspopup: el.getAttribute("aria-haspopup") || "",
       expanded: el.getAttribute("aria-expanded"),
       hint: ((typeof el.className === "string" ? el.className : "") + " " + (el.id || "") + " " + (el.getAttribute("data-icon") || "")).toLowerCase().slice(0, 120),
       download: el.hasAttribute("download"),
       hidden,
-      sortable: !!el.closest("[aria-sort]") || /(^|[^a-z])sort/i.test(raw) || /(^|[-_\s])sort(able|ing)?([-_\s]|$)/i.test(typeof el.className === "string" ? el.className : "") ||
+      sortable: !!closest(el, "[aria-sort]") || /(^|[^a-z])sort/i.test(raw) || /(^|[-_\s])sort(able|ing)?([-_\s]|$)/i.test(typeof el.className === "string" ? el.className : "") ||
         colHead(el) || // ADDITION 7: a table's column heading sorts
-        (!!el.closest(FILTERS) && opens(el)), // ADDITION 8: a filter panel's sections
+        (!!closest(el, FILTERS) && opens(el)), // ADDITION 8: a filter panel's sections
       pressed: el.getAttribute("aria-pressed"), // ADDITION 9: a toggle
+      group: el.hasAttribute("data-has-children"), // ADDITION 12
     };
   };
   // ── ADDITION 4: inside an open dialog, only the dialog ──
   const DLG = "[role=dialog], [role=alertdialog], dialog[open], [aria-modal='true'], .modal.show, .modal.in, .ui-dialog, .k-window, .ReactModal__Content";
-  const dialogs = opts.dialogOnly ? [...document.querySelectorAll(DLG)].filter((d) => { const r = d.getBoundingClientRect(); const s = getComputedStyle(d); return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none"; }) : [];
+  const dialogs = opts.dialogOnly ? qsa(DLG).filter((d) => { const r = d.getBoundingClientRect(); const s = getComputedStyle(d); return r.width > 0 && r.height > 0 && s.visibility !== "hidden" && s.display !== "none" &&
+    r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight; }) : []; // ADDITION 13
   const topDialog = dialogs.length ? dialogs[dialogs.length - 1] : null;
 
   const seen = new Set();
   const controls = [];
-  document.querySelectorAll(SEL).forEach((el) => {
+  qsa(SEL).forEach((el) => {
     if (!vis(el)) return;
-    if (topDialog && !topDialog.contains(el)) return; // ADDITION 4
+    if (topDialog && !within(topDialog, el)) return; // ADDITION 4
     if (el.disabled || el.getAttribute("aria-disabled") === "true") return; // ADDITION 2: a disabled control cannot be clicked
     const r = el.getBoundingClientRect();
     const key = el.tagName + "|" + txt(el) + "|" + (r.top | 0) + "|" + (r.left | 0);
@@ -204,8 +236,8 @@ function discoverControls(opts) {
       tag: el.tagName,
       label: txt(el),
       controlClass: classify(el),
-      inRow: !!el.closest("tr,[role=row]"),
-      inDialog: !!el.closest("[role=dialog]") || !!topDialog,
+      inRow: !!closest(el, "tr,[role=row]"),
+      inDialog: !!closest(el, "[role=dialog]") || !!topDialog,
       locator: locator(el),
       ...extra(el, false), // ADDITION 2
     });
@@ -213,9 +245,9 @@ function discoverControls(opts) {
 
   // ── ADDITION 3: links hidden in menus that open on hover ──
   if (!topDialog) {
-    document.querySelectorAll("a[href]").forEach((a) => {
+    qsa("a[href]").forEach((a) => {
       if (vis(a)) return;
-      if (!a.closest(NAV + ", [role=menu], [class*='menu' i], [class*='nav' i], [id*='menu' i], [id*='nav' i]")) return;
+      if (!closest(a, NAV + ", [role=menu], [class*='menu' i], [class*='nav' i], [id*='menu' i], [id*='nav' i]")) return;
       const x = extra(a, true);
       if (!x.href || seen.has("hidden|" + x.href)) return;
       seen.add("hidden|" + x.href);
@@ -223,11 +255,11 @@ function discoverControls(opts) {
     });
   }
 
-  const nav = [...document.querySelectorAll("nav a[href],[role=navigation] a[href],aside a[href]")]
+  const nav = qsa("a[href]").filter((a) => closest(a, "nav,[role=navigation],aside"))
     .filter(vis).map((a) => ({ label: txt(a), href: a.getAttribute("href") }));
-  const tabs = [...document.querySelectorAll("[role=tab]")].filter(vis).map(txt).filter(Boolean);
+  const tabs = qsa("[role=tab]").filter(vis).map(txt).filter(Boolean);
   const steps = [...new Set(
-    [...document.querySelectorAll("[aria-current=step],[class*=step],[class*=stepper] *")]
+    qsa("[aria-current=step],[class*=step],[class*=stepper] *")
       .filter(vis).map(txt).filter((s) => s && s.length < 40)
   )];
 

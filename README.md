@@ -4,6 +4,15 @@ Server side of the **Screenshot Library Builder** agent. Signs in to a product's
 
 Separate from content-api so a browser's memory use never touches content production.
 
+## Where the capture starts (1.8.0)
+
+- **The URL entered** is where it starts. If it is the site's root, or its sign-in page (the sign-in form is at that address, or the address is named login, sign-in, sso or auth), the capture starts from the page reached after sign-in, as before. Any other URL is a page inside the product: it is opened again after sign-in, so a site that sends every user to its own home page does not decide where the capture starts. Listed menu paths start from that page too.
+- **Its folder:** with no pages listed, a capture that starts at the URL entered takes only addresses under that URL's folder (`/app/x/` for `/app/x/home`). Links outside it are not followed and a click that leads outside it is not captured; the report counts them. If the URL opened somewhere else (the site sent it on), there is no limit. A Continue run keeps the first run's folder. The first screen is named by its highlighted menu item, else its heading.
+- **Web components:** the walk's control list, each screen's name, headings, labels and controls, what tells screens apart, and the loading check also look inside open shadow roots. A control inside one is clicked again by a CSS path through each host (`host > child`), which Playwright follows. On a page with no shadow roots every result is the same as in 1.7.2.
+- **Menu groups:** in the navigation, a control that opens a group of menu items (`data-has-children`) is opened like a menu button, so Menus and links finds a side menu's pages.
+- **Dialogs** count as open only when they are on screen: a side panel kept off to the right of the page does not hide the page behind it.
+- **Tabs that load a page** under the same heading as the page they sit on are named "<page> – <tab>" ("Security – Design-time"), like tabs that do not.
+
 ## Many customers at once (1.7.0)
 
 - Up to `CAPTURE_CONCURRENCY` captures (default 10) run at the same time, each in its own browser with its own sign-in. A capture beyond that waits its turn; its status says how many are ahead (`status_line`).

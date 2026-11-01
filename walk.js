@@ -171,15 +171,18 @@ function classify(c) {
     if (c.href && FILE_EXT.test(c.href.split(/[?#]/)[0])) return 'skip';
     const lw = c.href ? linkWords(c.href) : { path: '', query: '' };
     if (LINK_DANGER.test(text) || LINK_DANGER.test(lw.path) || TOGGLE_LINK.test(lw.path) || LINK_STRONG.test(lw.query)) return 'commit';
-    // A tab or menu item that is a button, or a link with no address, runs
-    // code, not a page load: it is judged by the button words too ("Export",
-    // "Archive").
-    if ((c.kind !== 'link' || codeLink) && COMMIT.test(text)) return 'commit';
+    // A menu item that is a button, or a link with no address, runs code, not
+    // a page load: it is judged by the button words too ("Export"). A tab
+    // only shows another view: it is judged by the link words above, so
+    // "Post runtime" or "Shared" is opened and "Archive" is not.
+    if ((c.kind !== 'link' || codeLink) && c.controlClass !== 'tab' && COMMIT.test(text)) return 'commit';
     if (!text) return 'unnamed';
     return 'nav';
   }
+  // In the navigation, a control that opens a group of menu items (a side
+  // menu's "Settings" that shows its pages when clicked) opens the menu.
   const navMenu = NAV_MENU.test(text) || NAV_HINT.test(c.hint) ||
-    (c.inNav && !c.inDialog && (c.haspopup || c.expanded !== null || MORE_WORD.test(text)));
+    (c.inNav && !c.inDialog && (c.haspopup || c.expanded !== null || MORE_WORD.test(text) || c.group));
   if (!text) {
     if (HINT_COMMIT.test(c.hint)) return 'commit';
     if (navMenu) return 'reveal';
@@ -200,27 +203,43 @@ const ALLOWED = {
   all: new Set(['nav', 'reveal', 'open', 'commit']),
 };
 
-/** Runs in the page. What tells this screen from others: the open dialog, the chosen tabs, the heading, and a summary of what is on screen. */
+/**
+ * Runs in the page. What tells this screen from others: the open dialog, the
+ * chosen tabs, the heading, and a summary of what is on screen. Looks inside
+ * open shadow roots (web components) too; on a page with none, the result is
+ * the same as a plain query.
+ */
 function stateInPage() {
   const DLG = '[role=dialog], [role=alertdialog], dialog[open], [aria-modal="true"], .modal.show, .modal.in, .ui-dialog, .k-window, .ReactModal__Content';
+  const below = (node) => {
+    const out = [];
+    const visit = (p) => { for (const el of p.children) { out.push(el); if (el.shadowRoot) visit(el.shadowRoot); visit(el); } };
+    visit(node);
+    return out;
+  };
+  const qsa = (sel, scope) => below(scope || document).filter((e) => e.matches(sel));
+  const up = (e) => e.parentElement || (e.parentNode && e.parentNode.host) || null;
+  const closest = (e, sel) => { for (let x = e; x; x = up(x)) if (x.matches(sel)) return x; return null; };
+  const byId = (node, id) => { const r = node.getRootNode(); return (r && r.getElementById ? r.getElementById(id) : null) || document.getElementById(id); };
   const vis = (el) => {
     const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
-    return r.width > 1 && r.height > 1 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05 && !el.closest('[aria-hidden="true"]');
+    return r.width > 1 && r.height > 1 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity) > 0.05 && !closest(el, '[aria-hidden="true"]');
   };
   const txt = (el) => (el ? (el.getAttribute('aria-label') || el.innerText || el.textContent || '') : '').replace(/\s+/g, ' ').trim().slice(0, 80);
-  const dialogs = [...document.querySelectorAll(DLG)].filter(vis);
+  // A dialog is open only when it is on screen (a side panel kept off to the right is not).
+  const onScreen = (el) => { const r = el.getBoundingClientRect(); return r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight; };
+  const dialogs = qsa(DLG).filter((d) => vis(d) && onScreen(d));
   const top = dialogs.length ? dialogs[dialogs.length - 1] : null;
   let dialog = '';
   if (top) {
     const lb = top.getAttribute('aria-labelledby');
-    dialog = top.getAttribute('aria-label') || (lb ? txt(document.getElementById(lb.split(/\s+/)[0])) : '') ||
-      txt(top.querySelector('h1, h2, h3, h4, [role=heading], .modal-title, .ui-dialog-title, legend, strong, b')) || 'dialog';
+    dialog = top.getAttribute('aria-label') || (lb ? txt(byId(top, lb.split(/\s+/)[0])) : '') ||
+      txt(qsa('h1, h2, h3, h4, [role=heading], .modal-title, .ui-dialog-title, legend, strong, b', top)[0]) || 'dialog';
   }
-  const root = top || document;
   // With a dialog open, only its own tabs tell one screen from another.
-  const tabs = [...root.querySelectorAll('[role=tab][aria-selected="true"]')].filter(vis).map(txt).filter(Boolean).join('+');
-  const h1 = txt([...document.querySelectorAll('h1, [role=heading][aria-level="1"]')].filter(vis)[0]);
-  const bits = [...root.querySelectorAll('h1, h2, h3, h4, [role=heading], label, legend, th, button, a, [role=tab], [role=menuitem], [role=option], input, select, textarea, summary, details[open] > *')]
+  const tabs = qsa('[role=tab][aria-selected="true"]', top).filter(vis).map(txt).filter(Boolean).join('+');
+  const h1 = txt(qsa('h1, [role=heading][aria-level="1"]').filter(vis)[0]);
+  const bits = qsa('h1, h2, h3, h4, [role=heading], label, legend, th, button, a, [role=tab], [role=menuitem], [role=option], input, select, textarea, summary, details[open] > *', top)
     .filter(vis).map((e) => (e.tagName + ':' + txt(e)).toLowerCase().replace(/\d+/g, '#')).filter((s) => s.length > 2);
   const sig = [...new Set(bits)].sort().join('|');
   return { dialog, tabs, h1, sig };
