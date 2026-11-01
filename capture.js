@@ -1099,6 +1099,9 @@ async function runCapture(job, creds, outDir) {
         return out;
       };
 
+      // Which document the page shows: a new one after every page load.
+      const docId = () => page.evaluate(() => performance.timeOrigin).catch(() => 0);
+
       const findAction = async (a) => {
         const frames = page.frames();
         const ordered = frames.filter((f) => framePat(f) === a.frame).concat(frames.filter((f) => framePat(f) !== a.frame));
@@ -1135,6 +1138,7 @@ async function runCapture(job, creds, outDir) {
           for (let i = 0; i < st.actions.length; i++) {
             const a = st.actions[i];
             const pressing = st.commit && i === st.actions.length - 1;
+            const docBefore = await docId();
             if (a.step) await clickStep(page, a.step);
             else {
               // A page that draws its content a moment after loading: look again for up to 8 seconds.
@@ -1157,6 +1161,13 @@ async function runCapture(job, creds, outDir) {
             if (popup) throw new Skip('window', a.label || a.step);
             if (!allowedHosts.has(new URL(page.url()).host)) throw new Skip('site', a.label || a.step);
             if (!inScope(page.url())) throw new Skip('outside', page.url());
+            // A click that loaded a page (a tab with its own address, even the
+            // same one): that page's pop-ups are cleared, as on a page opened by
+            // address, before the next click or the screenshot.
+            if (!pressing && (await docId()) !== docBefore) {
+              await waitForQuiet(page, 8000);
+              await cleanPage(page, size, false);
+            }
           }
         });
       };
@@ -1204,10 +1215,7 @@ async function runCapture(job, creds, outDir) {
         if (st.commit && last) tally(w.pressed, last.label);
         if (st.commit && !last) tally(w.pressed, st.trail[st.trail.length - 1]);
         const stillLoading = await waitForQuiet(page);
-        // A click that loaded another page (a tab with its own address): that
-        // page's pop-ups are cleared as on any page opened by address.
-        const loadedNew = !!(st.parent && st.actions.length && !st.commit && W.urlPattern(page.url()).pattern !== st.parent.pattern);
-        if (!st.actions.length || loadedNew) await cleanPage(page, size, false);
+        if (!st.actions.length) await cleanPage(page, size, false);
         const s = await stateOf();
         const pat = W.urlPattern(page.url());
         const raw = pat.pattern + (s.dialog ? '|dlg:' + W.norm(s.dialog) : '') + (s.tabs ? '|tab:' + W.norm(s.tabs) : '') +

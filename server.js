@@ -36,9 +36,10 @@
  *     stops the real pop-up (a product tour) being closed.
  *   - A tab is judged by the words that stop a link (delete, archive, send…),
  *     not by every button word: "Post runtime" is a view, not a post. A
- *     click that loads another page (a tab with its own address) has that
- *     page's pop-ups cleared before the screenshot, as a page opened by
- *     address does.
+ *     click that loads a page (a tab with its own address, even the same
+ *     one) has that page's pop-ups cleared before the next click or the
+ *     screenshot, as a page opened by address does: a product tour that
+ *     opens on every page load no longer hides the page from the walk.
  *   - A tab that loads its own page under the same heading as the page it
  *     sits on is named "<page> – <tab>", like a tab that does not.
  *   - A dialog counts as open only when it is on screen (discover_controls.js,
