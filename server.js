@@ -474,7 +474,13 @@ function walkMd(job) {
   else if (w.stopped === 'time') out.push('', 'It stopped after 45 minutes.' + left);
   else if (w.stopped === 'tries') out.push('', 'It stopped after trying 600 screens.' + left);
   else if (w.stopped === 'session') out.push('', 'It stopped because the site kept showing its sign-in page.');
-  else out.push('', 'It opened every screen it found.');
+  else if (w.stopped === 'failures') out.push('', 'It stopped early: ' + (w.recent_failed || 6) + ' of the last 10 screens it tried could not be opened (see Not captured).' + left);
+  const held = Object.entries(w.held || {});
+  if (held.length) {
+    const k = held.reduce((t, [, x]) => t + x, 0);
+    out.push('', 'It stopped clicking on ' + held.map(([a]) => mdCell(a)).join(', ') + ' after 3 clicks in a row there failed' +
+      (k ? '; ' + k + ' click' + (k === 1 ? ' there was' : 's there were') + ' left for Continue.' : '.'));
+  } else if (!w.stopped) out.push('', 'It opened every screen it found.');
   out.push('');
   if (w.level === 'all' && Object.keys(w.pressed).length) out.push('**Buttons pressed that change data:** ' + listOf(w.pressed, 30), '');
   const rows = [];
@@ -957,6 +963,9 @@ async function finalize(req, res, job) {
     '1. Unzip and upload the folder to a public link: a GitHub folder, a web folder, or a file listing the image links. The Storyboard and Lab Guide Developer uses this link to embed the screenshots, so share it with everyone building courses on this product.',
     '2. Change the sandbox password.', '');
   const notes = [];
+  if (job.walk && job.walk.stopped === 'failures') notes.push('it stopped early because most clicks were failing');
+  const heldAreas = job.walk ? Object.keys(job.walk.held || {}).length : 0;
+  if (heldAreas) notes.push('it stopped clicking on ' + plural(heldAreas, 'screen', 'screens') + ' after 3 failed clicks in a row');
   if (notCaptured.length) notes.push(plural(notCaptured.length, 'page', 'pages') + ' not captured');
   if (errorPages) notes.push(plural(errorPages, 'error page', 'error pages') + ' not kept');
   if (toCheck) notes.push(plural(toCheck, 'screenshot', 'screenshots') + ' to check');
