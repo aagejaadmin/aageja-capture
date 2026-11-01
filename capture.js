@@ -262,7 +262,8 @@ async function openMenus(page, tried) {
  */
 async function clickStep(page, text) {
   if (DANGER.test(text)) throw new CaptureError('"' + text + '" could change data, so it was not clicked.');
-  let el = await findStep(page, text);
+  // A page that draws its content a moment after loading: look again for up to 10 seconds.
+  let el = await waitFor(() => findStep(page, text), 10000, 700);
   const tried = new Set();
   for (let i = 0; !el && i < 4; i++) {
     if (!(await openMenus(page, tried))) break;
@@ -300,10 +301,25 @@ async function cleanPage(page, size, keepOpen) {
   const closers = ['button[aria-label*="close" i]', 'button[aria-label*="dismiss" i]', '[role=button][aria-label*="close" i]',
     'button[title*="close" i]', 'button:has-text("Close")', 'button:has-text("Dismiss")', 'button:has-text("Got it")',
     'button:has-text("No thanks")', 'button:has-text("Not now")', 'button:has-text("×")'];
+  // Only a close button on screen: one in a panel kept off to the side of the
+  // page cannot be clicked and would stop the real pop-up being closed.
+  const onScreen = async (selector) => {
+    for (const frame of page.frames()) {
+      const loc = frame.locator(selector);
+      const n = Math.min(await loc.count().catch(() => 0), 25);
+      for (let i = 0; i < n; i++) {
+        const el = loc.nth(i);
+        if (!(await el.isVisible().catch(() => false))) continue;
+        const b = await el.boundingBox().catch(() => null);
+        if (b && b.x + b.width > 0 && b.y + b.height > 0 && b.x < size.width && b.y < size.height) return el;
+      }
+    }
+    return null;
+  };
   for (let round = 0; round < 3; round++) {
     let closed = false;
     for (const c of containers) {
-      const el = await findVisible(page, closers.map((x) => c + ' ' + x).join(', '));
+      const el = await onScreen(closers.map((x) => c + ' ' + x).join(', '));
       if (el) { await el.click({ timeout: 3000 }).catch(() => {}); closed = true; await page.waitForTimeout(400); break; }
     }
     if (!closed) break;
@@ -1121,7 +1137,8 @@ async function runCapture(job, creds, outDir) {
             const pressing = st.commit && i === st.actions.length - 1;
             if (a.step) await clickStep(page, a.step);
             else {
-              const found = await findAction(a);
+              // A page that draws its content a moment after loading: look again for up to 8 seconds.
+              const found = await waitFor(() => findAction(a), 8000, 700);
               if (!found) throw new Skip('gone', a.label);
               // The last check before every click: the control on the page now
               // must pass this level's rules by its own name.
@@ -1187,7 +1204,10 @@ async function runCapture(job, creds, outDir) {
         if (st.commit && last) tally(w.pressed, last.label);
         if (st.commit && !last) tally(w.pressed, st.trail[st.trail.length - 1]);
         const stillLoading = await waitForQuiet(page);
-        if (!st.actions.length) await cleanPage(page, size, false);
+        // A click that loaded another page (a tab with its own address): that
+        // page's pop-ups are cleared as on any page opened by address.
+        const loadedNew = !!(st.parent && st.actions.length && !st.commit && W.urlPattern(page.url()).pattern !== st.parent.pattern);
+        if (!st.actions.length || loadedNew) await cleanPage(page, size, false);
         const s = await stateOf();
         const pat = W.urlPattern(page.url());
         const raw = pat.pattern + (s.dialog ? '|dlg:' + W.norm(s.dialog) : '') + (s.tabs ? '|tab:' + W.norm(s.tabs) : '') +
@@ -1262,13 +1282,24 @@ async function runCapture(job, creds, outDir) {
             : stillLoading ? 'The page was still loading after 12 seconds when it was captured. Check this image.' : '';
           const urlPath = new URL(page.url()).pathname.split('/').filter(Boolean);
           const parentScreen = st.parent ? st.parent.screen : 'Home';
-          if (st.home) { moduleName = 'Home'; screenName = 'Home'; }
+          if (st.home && !startHere) { moduleName = 'Home'; screenName = 'Home'; }
+          else if (st.home) {
+            // The URL entered: named by its highlighted menu item, else its heading.
+            const a = areaName(facts.active_nav);
+            moduleName = a || 'Home';
+            screenName = a || facts.h1 || nameFromTitle(facts.title) || masker(facts.big) || 'Home';
+          }
           else if (navigated && !s.dialog) {
             // The site's own area (the active menu item, else the menu section the
             // link sat in), else the first menu step.
             moduleName = areaName(facts.active_nav) || areaName(masker(st.section || '')) || areaName(masker((st.names || st.trail)[0] || '')) || urlPath[0] || 'general';
             // Every page is named by its own heading, as the page list names one.
             screenName = facts.h1 || nameFromTitle(facts.title) || masker(facts.big) || masker(st.trail[st.trail.length - 1] || '') || 'page';
+            // A tab that loads its own page under the same heading ("Security",
+            // tab Design-time) is named by the tab, like a tab that does not.
+            if (last && last.kind === 'tab' && st.parent && W.norm(screenName) === W.norm(parentScreen)) {
+              screenName = childName(moduleName, parentScreen, masker(last.label));
+            }
           } else if (s.dialog) {
             const d = masker(s.dialog);
             screenName = d && d !== 'dialog' ? d : childName(moduleName, parentScreen, masker(last ? last.label : ''));

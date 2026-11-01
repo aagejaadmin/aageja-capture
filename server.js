@@ -15,7 +15,8 @@
  *     outside it are not followed, and a click that leads outside it is not
  *     captured; the report counts them. A URL that opened somewhere else (the
  *     site sent it on) is no limit. A Continue run keeps the first run's
- *     folder.
+ *     folder. That first screen is named by its highlighted menu item, else
+ *     its heading, not "Home".
  *   - Web components: the walk's control list (discover_controls.js), the
  *     screen's name, headings, labels and controls (factsInPage), what tells
  *     screens apart (walk.js stateInPage, the same-content check) and the
@@ -26,6 +27,23 @@
  *   - In the navigation, a control that opens a group of menu items
  *     (data-has-children) opens the menu like a menu button, so Menus and
  *     links opens a side menu's groups to find their pages.
+ *   - A menu step, or a control the walk clicks again, that is not on the
+ *     page yet is looked for again for up to 10 (menu step) or 8 (walk)
+ *     seconds: pages that draw their content a moment after loading (tabs
+ *     on a web-component page) were reported as "Could not find".
+ *   - Clean-up before each screenshot closes a pop-up only by a close button
+ *     on screen: a close button in a panel kept off to the side no longer
+ *     stops the real pop-up (a product tour) being closed.
+ *   - A tab is judged by the words that stop a link (delete, archive, send…),
+ *     not by every button word: "Post runtime" is a view, not a post. A
+ *     click that loads another page (a tab with its own address) has that
+ *     page's pop-ups cleared before the screenshot, as a page opened by
+ *     address does.
+ *   - A tab that loads its own page under the same heading as the page it
+ *     sits on is named "<page> – <tab>", like a tab that does not.
+ *   - A dialog counts as open only when it is on screen (discover_controls.js,
+ *     walk.js stateInPage): a side panel kept off to the right of the page,
+ *     marked as a dialog, no longer hides the whole page from the walk.
  *
  * v1.7.2 — the report names the clicking choice as the form does
  *   - "How the capture went" said Choose "Also open buttons and dialogs"; the

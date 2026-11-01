@@ -1,0 +1,27 @@
+{
+  "product": "AI Control Tower",
+  "client": "Demo",
+  "captured": "2026-11-01",
+  "image_size": "1512x709",
+  "count": 1,
+  "images": [
+    {
+      "folder": "home",
+      "filename": "ai-control-tower_home_home.png",
+      "url": "home/ai-control-tower_home_home.png",
+      "description": "Test description for Home.",
+      "alt": "Home",
+      "elements": [
+        "button: ×",
+        "button: Show me later",
+        "button: Start tour"
+      ],
+      "module": "Home",
+      "screen": "Home",
+      "page_title": "Home",
+      "source_path": "/aiux/aict/home",
+      "captured": "2026-11-01"
+    }
+  ],
+  "not_captured": []
+}

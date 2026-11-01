@@ -171,10 +171,11 @@ function classify(c) {
     if (c.href && FILE_EXT.test(c.href.split(/[?#]/)[0])) return 'skip';
     const lw = c.href ? linkWords(c.href) : { path: '', query: '' };
     if (LINK_DANGER.test(text) || LINK_DANGER.test(lw.path) || TOGGLE_LINK.test(lw.path) || LINK_STRONG.test(lw.query)) return 'commit';
-    // A tab or menu item that is a button, or a link with no address, runs
-    // code, not a page load: it is judged by the button words too ("Export",
-    // "Archive").
-    if ((c.kind !== 'link' || codeLink) && COMMIT.test(text)) return 'commit';
+    // A menu item that is a button, or a link with no address, runs code, not
+    // a page load: it is judged by the button words too ("Export"). A tab
+    // only shows another view: it is judged by the link words above, so
+    // "Post runtime" or "Shared" is opened and "Archive" is not.
+    if ((c.kind !== 'link' || codeLink) && c.controlClass !== 'tab' && COMMIT.test(text)) return 'commit';
     if (!text) return 'unnamed';
     return 'nav';
   }
