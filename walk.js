@@ -71,7 +71,9 @@ const MORE_WORD = /(\bmore\b|\bactions\b|\boptions\b|⋯|⋮|…|▾|▼)/i;
 
  // A page that shows the site's error message instead of a screen: never
 // kept, and nothing on it is opened. Tested on its headings and title.
-const ERROR_PAGE = /(\ban?\s+(unexpected\s+)?error\s+(has\s+)?occurred|\berror\s+occurred\s+while\s+processing|\bsomething\s+went\s+wrong|\bpage\s+(was\s+)?not\s+found|\b404\b|\binternal\s+server\s+error|\baccess\s+denied|\bnot\s+authori[sz]ed\b|\byou\s+do\s+not\s+have\s+(permission|access)|\bforbidden\b|\bsession\s+(has\s+)?(expired|timed\s+out))/i;
+// From 1.9.0 also "You don't have access", "Access not available" and
+// "Permission denied".
+const ERROR_PAGE = /(\ban?\s+(unexpected\s+)?error\s+(has\s+)?occurred|\berror\s+occurred\s+while\s+processing|\bsomething\s+went\s+wrong|\bpage\s+(was\s+)?not\s+found|\b404\b|\binternal\s+server\s+error|\baccess\s+denied|\bnot\s+authori[sz]ed\b|\byou\s+(do\s+not|don['’]?t)\s+have\s+(the\s+)?(permission|access)|\baccess\s+not\s+available\b|\bpermission\s+denied\b|\bforbidden\b|\bsession\s+(has\s+)?(expired|timed\s+out))/i;
 
 // In a link's address, the query settings ("?Reset=true" on Cornerstone's
 // transcript link resets its filters) are only checked for these words; the
@@ -239,8 +241,16 @@ function stateInPage() {
   // With a dialog open, only its own tabs tell one screen from another.
   const tabs = qsa('[role=tab][aria-selected="true"]', top).filter(vis).map(txt).filter(Boolean).join('+');
   const h1 = txt(qsa('h1, [role=heading][aria-level="1"]').filter(vis)[0]);
+  // A breadcrumb trail ("Home / … / the page you came from") says how the page
+  // was reached, not what is on it: left out (1.9.0). Only a small one counts,
+  // never a wrapper around the page that has "breadcrumb" in its class.
+  const crumb = new Set();
+  for (const c of qsa('[class*=breadcrumb i], [aria-label*=breadcrumb i], [id*=breadcrumb i]')) {
+    if ((c.innerText || c.textContent || '').length > 300 || qsa('h1, h2, main, table, form', c).length) continue;
+    crumb.add(c); for (const e of below(c)) crumb.add(e);
+  }
   const bits = qsa('h1, h2, h3, h4, [role=heading], label, legend, th, button, a, [role=tab], [role=menuitem], [role=option], input, select, textarea, summary, details[open] > *', top)
-    .filter(vis).map((e) => (e.tagName + ':' + txt(e)).toLowerCase().replace(/\d+/g, '#')).filter((s) => s.length > 2);
+    .filter((e) => vis(e) && !crumb.has(e)).map((e) => (e.tagName + ':' + txt(e)).toLowerCase().replace(/\d+/g, '#')).filter((s) => s.length > 2);
   const sig = [...new Set(bits)].sort().join('|');
   return { dialog, tabs, h1, sig };
 }

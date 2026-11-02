@@ -1,6 +1,27 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.8.1 (November 2026)
+ * AaGeJa Capture Service — v1.9.0 (November 2026)
+ *
+ * v1.9.0 — a library that is easier to use, and a walk that stops wasting time
+ *   Every rule reads what any website has (menus, tabs, breadcrumbs,
+ *   headings), never one product's names or addresses.
+ *   - The same screen reached from different pages is kept once: a
+ *     breadcrumb trail ("Home / … / the page you came from") is left out when
+ *     screens are compared. On AI Control Tower 10 of 82 screenshots were
+ *     such repeats.
+ *   - Folders follow the product's menu groups: the group the highlighted
+ *     menu item sits in (Plan, Govern, Settings…), else the item itself, as
+ *     before. A menu button just before the box holding the item names the
+ *     group; a button before the whole menu (☰) does not.
+ *   - Names: screens in one folder that share a name are named by their
+ *     chosen tab as well ("Inventory" > "AI systems"). A name used once is not
+ *     changed. A tab with the page's own name is not added twice.
+ *   - Error pages also include "You don't have access", "Access not
+ *     available" and "Permission denied", and headings inside web components
+ *     are read.
+ *   - Clicks that keep failing: after 3 failures in a row on one screen, its
+ *     other clicks (not its menu) are left for Continue; when 6 of the last 10
+ *     screens tried failed, the run stops and says so.
  *
  * v1.8.1 — controls inside ServiceNow's web components can be clicked
  *   - A control's CSS path uses an element's id attribute, never its id
@@ -337,7 +358,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.8.1';
+const VERSION = '1.9.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
@@ -474,7 +495,13 @@ function walkMd(job) {
   else if (w.stopped === 'time') out.push('', 'It stopped after 45 minutes.' + left);
   else if (w.stopped === 'tries') out.push('', 'It stopped after trying 600 screens.' + left);
   else if (w.stopped === 'session') out.push('', 'It stopped because the site kept showing its sign-in page.');
-  else out.push('', 'It opened every screen it found.');
+  else if (w.stopped === 'failures') out.push('', 'It stopped early: ' + (w.recent_failed || 6) + ' of the last 10 screens it tried could not be opened (see Not captured).' + left);
+  const held = Object.entries(w.held || {});
+  if (held.length) {
+    const k = held.reduce((t, [, x]) => t + x, 0);
+    out.push('', 'It stopped clicking on ' + held.map(([a]) => mdCell(a)).join(', ') + ' after 3 clicks in a row there failed' +
+      (k ? '; ' + k + ' click' + (k === 1 ? ' there was' : 's there were') + ' left for Continue.' : '.'));
+  } else if (!w.stopped) out.push('', 'It opened every screen it found.');
   out.push('');
   if (w.level === 'all' && Object.keys(w.pressed).length) out.push('**Buttons pressed that change data:** ' + listOf(w.pressed, 30), '');
   const rows = [];
@@ -957,6 +984,9 @@ async function finalize(req, res, job) {
     '1. Unzip and upload the folder to a public link: a GitHub folder, a web folder, or a file listing the image links. The Storyboard and Lab Guide Developer uses this link to embed the screenshots, so share it with everyone building courses on this product.',
     '2. Change the sandbox password.', '');
   const notes = [];
+  if (job.walk && job.walk.stopped === 'failures') notes.push('it stopped early because most clicks were failing');
+  const heldAreas = job.walk ? Object.keys(job.walk.held || {}).length : 0;
+  if (heldAreas) notes.push('it stopped clicking on ' + plural(heldAreas, 'screen', 'screens') + ' after 3 failed clicks in a row');
   if (notCaptured.length) notes.push(plural(notCaptured.length, 'page', 'pages') + ' not captured');
   if (errorPages) notes.push(plural(errorPages, 'error page', 'error pages') + ' not kept');
   if (toCheck) notes.push(plural(toCheck, 'screenshot', 'screenshots') + ' to check');

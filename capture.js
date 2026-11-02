@@ -501,6 +501,23 @@ function factsInPage(arg) {
     e.matches('[aria-current="page"], [aria-current="true"]') ||
     (e.matches('.active, .on, .selected') && up(e) && closest(up(e), 'nav')) ||
     (e.matches('.active, [aria-selected="true"]') && up(e) && closest(up(e), '[role=navigation]'))) || null;
+  // The menu group the active item sits in (1.9.0): the label of the menu
+  // button just before the box that holds it ("Plan" for Plan > Strategize),
+  // the outermost one. Not a button before the whole menu (a ☰ toggle): the
+  // box must hold fewer links than the menu.
+  let group = '';
+  const menu = active ? closest(active, 'nav, [role=navigation], aside, header') : null;
+  if (menu) {
+    const links = (el) => qsa('a[href]', el).length;
+    const total = links(menu);
+    for (let x = up(active); x && x !== menu; x = up(x)) {
+      const p = x.previousElementSibling;
+      if (!p || !p.matches('button, [role=button], summary, [aria-expanded], [aria-haspopup]')) continue;
+      const t = txt(p).replace(/[▾▼▴▲▸▶◂◀⌄⌃˅›»]+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!t || t.length > 40 || links(x) >= total) continue;
+      group = t;
+    }
+  }
   const CHROME = 'nav, header, aside, footer, [role=navigation], [role=banner], [role=contentinfo], [role=complementary]';
   const inChrome = (el) => !!closest(el, CHROME);
   const ctl = all('button, [role=button], a[href], [role=tab], [role=menuitem], input:not([type=hidden]), select, textarea, .btn, [onclick]')
@@ -547,6 +564,7 @@ function factsInPage(arg) {
     labels: uniq(all('label, th, legend, dt').map(txt)).slice(0, 25),
     controls: uniq(controls).slice(0, 60),
     active_nav: active && vis(active) ? txt(active).replace(/(\s+\d+)+$/, '').trim() : '',
+    active_group: active && vis(active) ? group : '',
     body_text: bodyText,
   };
 }
@@ -558,14 +576,14 @@ async function maskPage(page, words) {
 }
 
 async function pageFacts(page, opts) {
-  const merged = { title: '', h1: '', big: '', headings: [], labels: [], controls: [], active_nav: '', body_text: 0 };
+  const merged = { title: '', h1: '', big: '', headings: [], labels: [], controls: [], active_nav: '', active_group: '', body_text: 0 };
   for (const f of page.frames()) {
     const x = await f.evaluate(factsInPage, opts || null).catch(() => null);
     if (!x) continue;
     if (f === page.mainFrame()) merged.title = x.title;
     merged.h1 = merged.h1 || x.h1;
     merged.big = merged.big || x.big || '';
-    merged.active_nav = merged.active_nav || x.active_nav;
+    if (!merged.active_nav && x.active_nav) { merged.active_nav = x.active_nav; merged.active_group = x.active_group || ''; }
     merged.body_text += x.body_text || 0;
     for (const k of ['headings', 'labels', 'controls']) merged[k] = [...new Set(merged[k].concat(x[k]))];
   }
@@ -724,6 +742,8 @@ async function runCapture(job, creds, outDir) {
   const state = { guard: false, acting: false, acceptDialogs: false, probe: false };
   let page = null;
   let debugN = 0;
+  // Each screenshot's chosen tabs ("folder/file" -> "Connectors+Traces").
+  const screenTabs = new Map();
 
   /** Records where the browser is: site and path only, never query strings. */
   const note = async (step) => {
@@ -928,7 +948,7 @@ async function runCapture(job, creds, outDir) {
     };
 
     /** Saves a screenshot of the page as it is now and records the screen. */
-    const shoot = async ({ moduleName, screenName, target, facts, warning, reached }) => {
+    const shoot = async ({ moduleName, screenName, target, facts, warning, reached, tabs }) => {
       const folder = slug(moduleName) || 'general';
       const base = [slug(job.product, 30) || 'product', folder, slug(screenName) || 'page'].join('_');
       let filename = base + '.png';
@@ -953,6 +973,8 @@ async function runCapture(job, creds, outDir) {
         elements: facts.controls, source_path: pathOnly(page.url()), warning,
         ...(reached ? { reached_by: reached } : {}),
       });
+      // Its chosen tabs, for telling apart screens that share a name (1.9.0).
+      if (tabs) screenTabs.set(folder + '/' + filename, tabs);
     };
 
     job.stage = 'capturing';
@@ -1041,9 +1063,42 @@ async function runCapture(job, creds, outDir) {
       job.walk = {
         level, mode: followLinks ? 'walk' : 'list', stopped: '', tried: 0, nochange: 0, gone: 0, failed: 0, left: 0,
         unnamed: 0, downloads: 0, same: 0, browse: 0, repeats: {}, errors: {}, never: {}, change: {}, confirmed: {}, window: {}, site: {}, pressed: {},
-        scope: scope ? scope.path : '', outside: 0,
+        scope: scope ? scope.path : '', outside: 0, held: {}, recent_failed: 0,
       };
       await walkFrom(seeds, followLinks);
+    }
+    lengthenRepeatedNames();
+
+    /**
+     * Screens in one folder that share a name ("Inventory" for each of its
+     * tabs) are named by their chosen tab as well ("AI systems", "Security –
+     * Design-time"). A name used once is left as it is. An earlier run's names
+     * (Continue) count but are not changed. (1.9.0)
+     */
+    function lengthenRepeatedNames() {
+      const key = (s) => String(s.folder) + '|' + W.norm(s.screen);
+      const count = new Map();
+      for (const s of ((job.prior && job.prior.rows) || []).concat(job.screens)) count.set(key(s), (count.get(key(s)) || 0) + 1);
+      for (const s of job.screens) {
+        if ((count.get(key(s)) || 0) < 2) continue;
+        const tabs = String(screenTabs.get(s.folder + '/' + s.filename) || '').split('+').map((t) => masker(t.trim()))
+          .filter((t) => t && W.norm(t) !== W.norm(s.screen) && W.norm(t) !== W.norm(s.module));
+        if (!tabs.length) continue;
+        const name = childName(s.module, s.screen, tabs[tabs.length - 1]);
+        const base = [slug(job.product, 30) || 'product', s.folder, slug(name) || 'page'].join('_');
+        const old = s.folder + '/' + s.filename;
+        used.delete(old);
+        let filename = base + '.png';
+        for (let i = 2; used.has(s.folder + '/' + filename); i++) filename = base + '-' + i + '.png';
+        try {
+          fs.renameSync(path.join(outDir, s.folder, s.filename), path.join(outDir, s.folder, filename));
+          const t0 = path.join(outDir, '_thumbs', s.folder, s.filename.replace(/\.png$/, '.jpg'));
+          if (fs.existsSync(t0)) fs.renameSync(t0, path.join(outDir, '_thumbs', s.folder, filename.replace(/\.png$/, '.jpg')));
+        } catch (_) { used.add(old); continue; }
+        used.add(s.folder + '/' + filename);
+        s.filename = filename;
+        s.screen = name;
+      }
     }
 
     /**
@@ -1198,7 +1253,7 @@ async function runCapture(job, creds, outDir) {
         await shoot({
           moduleName: st.parent ? st.parent.module : 'Home',
           screenName: d && d !== 'dialog' ? d : childName(st.parent ? st.parent.module : 'Home', parentScreen, masker(last.label) + ' confirmation'),
-          facts, warning: '', target: masker(st.trail.join(' > ')),
+          facts, warning: '', tabs: s.tabs, target: masker(st.trail.join(' > ')),
           reached: masker(st.trail.join(' > ')) + ' (the box was then canceled)',
         });
         tally(w.confirmed, last.label);
@@ -1236,8 +1291,14 @@ async function runCapture(job, creds, outDir) {
 
         // The site's error page ("An error occurred while processing your
         // request") is not a screen: not kept, and nothing on it is opened.
-        const heads = await page.evaluate(() => [...document.querySelectorAll('h1, h2, [role=heading]')].filter((e) => e.offsetParent !== null)
-          .slice(0, 3).map((e) => (e.innerText || '').trim().slice(0, 120)).join(' | ')).catch(() => '');
+        // Headings inside open shadow roots too (1.9.0).
+        const heads = await page.evaluate(() => {
+          const out = [];
+          const visit = (p) => { for (const el of p.children) { out.push(el); if (el.shadowRoot) visit(el.shadowRoot); visit(el); } };
+          visit(document);
+          return out.filter((e) => e.matches('h1, h2, [role=heading]') && e.offsetParent !== null)
+            .slice(0, 3).map((e) => (e.innerText || '').trim().slice(0, 120)).join(' | ');
+        }).catch(() => '');
         if (W.ERROR_PAGE.test([s.h1, s.dialog, await page.title().catch(() => ''), heads].join(' | '))) {
           tally(w.errors, st.trail.join(' > ') || 'Home');
           return;
@@ -1251,12 +1312,24 @@ async function runCapture(job, creds, outDir) {
           for (const f of page.frames()) {
             texts.push(await f.evaluate(() => {
               let t = document.body ? document.body.innerText : '';
+              // A breadcrumb trail says how the page was reached, not what is on
+              // it: its text is left out (1.9.0), as in stateInPage (walk.js).
+              const all = [];
+              const each = (p) => { for (const el of p.children) { all.push(el); if (el.shadowRoot) each(el.shadowRoot); each(el); } };
+              each(document);
+              const crumb = new Set();
+              for (const c of all.filter((e) => e.matches('[class*=breadcrumb i], [aria-label*=breadcrumb i], [id*=breadcrumb i]'))) {
+                const inner = []; const sub = (p) => { for (const el of p.children) { inner.push(el); if (el.shadowRoot) sub(el.shadowRoot); sub(el); } }; sub(c);
+                if ((c.innerText || c.textContent || '').length > 300 || inner.some((e) => e.matches('h1, h2, main, table, form'))) continue;
+                crumb.add(c); for (const e of inner) crumb.add(e);
+                if (c.getRootNode() === document && c.innerText) t = t.replace(c.innerText, ' ');
+              }
               // The text inside open shadow roots (web components), when there are any.
               const visit = (p) => {
                 for (const el of p.children) {
                   if (el.shadowRoot) {
                     const tw = document.createTreeWalker(el.shadowRoot, NodeFilter.SHOW_TEXT);
-                    while (tw.nextNode()) { const q = tw.currentNode.parentElement; if (!q || !/^(SCRIPT|STYLE|NOSCRIPT)$/.test(q.tagName)) t += ' ' + tw.currentNode.nodeValue; }
+                    while (tw.nextNode()) { const q = tw.currentNode.parentElement; if (!q || (!/^(SCRIPT|STYLE|NOSCRIPT)$/.test(q.tagName) && !crumb.has(q))) t += ' ' + tw.currentNode.nodeValue; }
                     visit(el.shadowRoot);
                   }
                   visit(el);
@@ -1297,18 +1370,20 @@ async function runCapture(job, creds, outDir) {
           else if (st.home) {
             // The URL entered: named by its highlighted menu item, else its heading.
             const a = areaName(facts.active_nav);
-            moduleName = a || 'Home';
+            moduleName = areaName(facts.active_group) || a || 'Home';
             screenName = a || facts.h1 || nameFromTitle(facts.title) || masker(facts.big) || 'Home';
           }
           else if (navigated && !s.dialog) {
-            // The site's own area (the active menu item, else the menu section the
-            // link sat in), else the first menu step.
-            moduleName = areaName(facts.active_nav) || areaName(masker(st.section || '')) || areaName(masker((st.names || st.trail)[0] || '')) || urlPath[0] || 'general';
+            // The site's own area: the menu group the active menu item sits in
+            // (1.9.0), else the active menu item, else the menu section the link
+            // sat in, else the first menu step.
+            moduleName = areaName(facts.active_group) || areaName(facts.active_nav) || areaName(masker(st.section || '')) || areaName(masker((st.names || st.trail)[0] || '')) || urlPath[0] || 'general';
             // Every page is named by its own heading, as the page list names one.
             screenName = facts.h1 || nameFromTitle(facts.title) || masker(facts.big) || masker(st.trail[st.trail.length - 1] || '') || 'page';
             // A tab that loads its own page under the same heading ("Security",
             // tab Design-time) is named by the tab, like a tab that does not.
-            if (last && last.kind === 'tab' && st.parent && W.norm(screenName) === W.norm(parentScreen)) {
+            // Not when the tab has the page's own name ("Policies – Policies").
+            if (last && last.kind === 'tab' && st.parent && W.norm(screenName) === W.norm(parentScreen) && W.norm(last.label) !== W.norm(screenName)) {
               screenName = childName(moduleName, parentScreen, masker(last.label));
             }
           } else if (s.dialog) {
@@ -1317,7 +1392,7 @@ async function runCapture(job, creds, outDir) {
           } else screenName = childName(moduleName, parentScreen, masker(last ? last.label : ''));
           seenSig.add(same);
           await shoot({
-            moduleName, screenName, facts, warning,
+            moduleName, screenName, facts, warning, tabs: s.tabs,
             target: masker(st.trail.join(' > ') || 'Home'),
             reached: masker(st.trail.join(' > ') || 'the page after sign-in'),
           });
@@ -1400,7 +1475,7 @@ async function runCapture(job, creds, outDir) {
               base: st.base, actions: st.actions.concat({ frame: c.frame, sel: c.sel, label: c.label, kind: c.kind }),
               trail: st.trail.concat(c.label || 'unnamed'), names: cls === 'reveal' ? (st.names || st.trail) : (st.names || st.trail).concat(c.label || 'unnamed'),
               section: c.section || st.section || '',
-              parent: node, phase, commit, probe,
+              parent: node, phase, commit, probe, nav: !!c.inNav,
               capture: !(cls === 'reveal' && level === 'links'),
             });
           }
@@ -1408,15 +1483,40 @@ async function runCapture(job, creds, outDir) {
         progress();
       };
 
+      // Clicks that keep failing (1.9.0). On one screen, 3 clicks in a row
+      // that fail: its other clicks are left for Continue (links from it are
+      // still followed, and so is its navigation menu). Across the run, 6
+      // of the last 10 screens it tried: the run stops. A control that is not
+      // there any more (the page changed) is not a failure.
+      const SCREEN_FAILS = 3;
+      const fromOf = (st) => (st.parent ? st.parent.fp : '');
+      const nameOf = (st) => masker(st.parent ? (W.norm(st.parent.module) === W.norm(st.parent.screen) ? st.parent.screen : st.parent.module + ' > ' + st.parent.screen) : 'Home');
+      const streak = new Map();
+      const stopped = new Set();
+      const recent = [];
+      const held = [];
+      const outcome = (st, failed) => {
+        recent.push(failed ? 1 : 0);
+        if (recent.length > 10) recent.shift();
+        if (!st.actions.length) return;
+        const k = fromOf(st);
+        streak.set(k, failed ? (streak.get(k) || 0) + 1 : 0);
+        if (failed && streak.get(k) >= SCREEN_FAILS && !stopped.has(k)) { stopped.add(k); w.held[nameOf(st)] = 0; }
+      };
       while (q1.length || q2.length) {
         if (job.screens.length >= MAX_SCREENS) { w.stopped = 'limit'; break; }
         if (Date.now() - t0 > WALK_MS) { w.stopped = 'time'; break; }
         if (w.tried >= MAX_STATES) { w.stopped = 'tries'; break; }
+        if (recent.length === 10 && recent.reduce((x, y) => x + y, 0) >= 6) { w.stopped = 'failures'; w.recent_failed = recent.reduce((x, y) => x + y, 0); break; }
         const st = q1.length ? q1.shift() : q2.shift();
+        // The site's navigation is never left: it is how the walk reaches the rest.
+        if (st.actions.length && !st.nav && stopped.has(fromOf(st))) { held.push(st); w.held[nameOf(st)] = (w.held[nameOf(st)] || 0) + 1; continue; }
         w.tried++;
         job.progress.current = masker(st.trail.join(' > ') || 'Home');
+        const failedBefore = w.failed;
         try {
           await visit(st);
+          outcome(st, false);
         } catch (e) {
           state.probe = false;
           if (e instanceof Skip) {
@@ -1440,8 +1540,11 @@ async function runCapture(job, creds, outDir) {
             }
           }
         }
+        if (w.failed > failedBefore) outcome(st, true);
         state.probe = false;
       }
+      // Screens in an area left after its failures: tried again by Continue.
+      for (const s of held) q1.push(s);
       w.left = pending();
       w.downloads = downloads.size;
       w.outside = outside.size;

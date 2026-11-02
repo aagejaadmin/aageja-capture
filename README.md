@@ -4,6 +4,16 @@ Server side of the **Screenshot Library Builder** agent. Signs in to a product's
 
 Separate from content-api so a browser's memory use never touches content production.
 
+## Repeats, folders, names and failing clicks (1.9.0)
+
+Each rule reads what any website has (menus, tabs, breadcrumbs, headings), never one product's names or addresses.
+
+- **Repeats:** a breadcrumb trail ("Home / … / the page you came from": an element whose class, id or label says breadcrumb, small and with no headings, tables or forms in it) is left out when screens are compared, so the same screen reached from two pages is kept once.
+- **Folders:** the menu group the highlighted menu item sits in: the label of the menu button (a button, `role=button`, `summary`, or a control with `aria-expanded` or `aria-haspopup`) just before the box that holds the item, the outermost one, and only when that box holds fewer links than the whole menu (a ☰ button before the whole menu does not count). Without one, the highlighted item, as before.
+- **Names:** screens in one folder that would share a name also get their chosen tab (`role=tab` with `aria-selected`): "Inventory" becomes "AI systems" in the Inventory folder; "Security" becomes "Security – Design-time". A name used once is not changed. An earlier run's names (Continue) count but are not changed.
+- **Error pages** also include "You don't have access", "Access not available" and "Permission denied"; headings inside web components are read.
+- **Failing clicks:** on one screen, after 3 clicks in a row fail, its other clicks (never its navigation menu) are left for Continue, and the report names the screen. When 6 of the last 10 screens tried failed, the run stops and says so. A control that is no longer there (the page changed) is not a failure.
+
 ## Where the capture starts (1.8.0)
 
 - **The URL entered** is where it starts. If it is the site's root, or its sign-in page (the sign-in form is at that address, or the address is named login, sign-in, sso or auth), the capture starts from the page reached after sign-in, as before. Any other URL is a page inside the product: it is opened again after sign-in, so a site that sends every user to its own home page does not decide where the capture starts. Listed menu paths start from that page too.
