@@ -1,6 +1,27 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.8.1 (November 2026)
+ * AaGeJa Capture Service — v1.9.0 (November 2026)
+ *
+ * v1.9.0 — a library that is easier to use, and a walk that stops wasting time
+ *   Every rule reads what any website has (menus, tabs, breadcrumbs,
+ *   headings), never one product's names or addresses.
+ *   - The same screen reached from different pages is kept once: a
+ *     breadcrumb trail ("Home / … / the page you came from") is left out when
+ *     screens are compared. On AI Control Tower 10 of 82 screenshots were
+ *     such repeats.
+ *   - Folders follow the product's menu groups: the group the highlighted
+ *     menu item sits in (Plan, Govern, Settings…), else the item itself, as
+ *     before. A menu button just before the box holding the item names the
+ *     group; a button before the whole menu (☰) does not.
+ *   - Names: screens in one folder that share a name are named by their
+ *     chosen tab as well ("Inventory" > "AI systems"). A name used once is not
+ *     changed. A tab with the page's own name is not added twice.
+ *   - Error pages also include "You don't have access", "Access not
+ *     available" and "Permission denied", and headings inside web components
+ *     are read.
+ *   - Clicks that keep failing: after 3 failures in a row on one screen, its
+ *     other clicks (not its menu) are left for Continue; when 6 of the last 10
+ *     screens tried failed, the run stops and says so.
  *
  * v1.8.1 — controls inside ServiceNow's web components can be clicked
  *   - A control's CSS path uses an element's id attribute, never its id
@@ -337,7 +358,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.8.1';
+const VERSION = '1.9.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';

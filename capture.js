@@ -1082,7 +1082,7 @@ async function runCapture(job, creds, outDir) {
       for (const s of job.screens) {
         if ((count.get(key(s)) || 0) < 2) continue;
         const tabs = String(screenTabs.get(s.folder + '/' + s.filename) || '').split('+').map((t) => masker(t.trim()))
-          .filter((t) => t && W.norm(t) !== W.norm(s.screen) && W.norm(t) !== W.norm(s.module) && !W.norm(s.screen).includes(W.norm(t)));
+          .filter((t) => t && W.norm(t) !== W.norm(s.screen) && W.norm(t) !== W.norm(s.module));
         if (!tabs.length) continue;
         const name = childName(s.module, s.screen, tabs[tabs.length - 1]);
         const base = [slug(job.product, 30) || 'product', s.folder, slug(name) || 'page'].join('_');
@@ -1475,7 +1475,7 @@ async function runCapture(job, creds, outDir) {
               base: st.base, actions: st.actions.concat({ frame: c.frame, sel: c.sel, label: c.label, kind: c.kind }),
               trail: st.trail.concat(c.label || 'unnamed'), names: cls === 'reveal' ? (st.names || st.trail) : (st.names || st.trail).concat(c.label || 'unnamed'),
               section: c.section || st.section || '',
-              parent: node, phase, commit, probe,
+              parent: node, phase, commit, probe, nav: !!c.inNav,
               capture: !(cls === 'reveal' && level === 'links'),
             });
           }
@@ -1485,7 +1485,7 @@ async function runCapture(job, creds, outDir) {
 
       // Clicks that keep failing (1.9.0). On one screen, 3 clicks in a row
       // that fail: its other clicks are left for Continue (links from it are
-      // still followed: opening an address is not a click). Across the run, 6
+      // still followed, and so is its navigation menu). Across the run, 6
       // of the last 10 screens it tried: the run stops. A control that is not
       // there any more (the page changed) is not a failure.
       const SCREEN_FAILS = 3;
@@ -1509,7 +1509,8 @@ async function runCapture(job, creds, outDir) {
         if (w.tried >= MAX_STATES) { w.stopped = 'tries'; break; }
         if (recent.length === 10 && recent.reduce((x, y) => x + y, 0) >= 6) { w.stopped = 'failures'; w.recent_failed = recent.reduce((x, y) => x + y, 0); break; }
         const st = q1.length ? q1.shift() : q2.shift();
-        if (st.actions.length && stopped.has(fromOf(st))) { held.push(st); w.held[nameOf(st)] = (w.held[nameOf(st)] || 0) + 1; continue; }
+        // The site's navigation is never left: it is how the walk reaches the rest.
+        if (st.actions.length && !st.nav && stopped.has(fromOf(st))) { held.push(st); w.held[nameOf(st)] = (w.held[nameOf(st)] || 0) + 1; continue; }
         w.tried++;
         job.progress.current = masker(st.trail.join(' > ') || 'Home');
         const failedBefore = w.failed;
