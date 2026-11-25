@@ -11,11 +11,12 @@
  *     have help pages and release notes full of screenshots.
  *   - Each image keeps its own size (library.json image_size "original").
  *     Named from the heading above it, in a folder named for the document.
- *     Emails, phone numbers and the words to hide that can be read on an
- *     image are covered, and the image is listed to check.
+ *     The images are already published in the document, so only the user's
+ *     own words to hide are covered (where they can be read); emails and
+ *     phone numbers stay as the document shows them.
  *   - status_line says which file is being read. The Library Ready text for
  *     documents: Finished (or the files left for the next run, at 100
- *     screenshots), what each file gave, check the catalog before sharing,
+ *     screenshots), what each file gave, the download and the upload step;
  *     no sandbox password step. The catalog fits each image on its page.
  *   - A live capture is unchanged: the same requests, screenshots, library
  *     and texts as 1.10.0 on the stand-in app (compared file by file).
@@ -726,9 +727,8 @@ function docsSummaryMd(job, rows, pdf, when, missing) {
   md.push('**Download:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + '): ' + nWord(rows.length, 'screenshot', 'screenshots'), '');
   if (pdf) md.push('**Catalog:** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): each screenshot with its name and description', '');
   md.push('Download within 24 hours (by ' + when + ').', '',
-    '**Next steps**', '',
-    '1. Check the ' + (pdf ? 'catalog' : 'screenshots') + ' before you share the screenshots. Emails, phone numbers and your words to hide are hidden only where the text could be read.',
-    '2. Unzip and upload the folder to a public link: a GitHub folder, a web folder, or a file listing the image links. The Storyboard and Lab Guide Developer uses this link to embed the screenshots, so share it with everyone building courses on this product.', '');
+    '**Next step**', '',
+    'Unzip and upload the folder to a public link: a GitHub folder, a web folder, or a file listing the image links. The Storyboard and Lab Guide Developer uses this link to embed the screenshots, so share it with everyone building courses on this product.', '');
   const notes = [];
   const toCheck = job.screens.filter((x) => x.warning).length;
   if (toCheck) notes.push(nWord(toCheck, 'screenshot', 'screenshots') + ' to check');

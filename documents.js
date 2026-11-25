@@ -18,10 +18,10 @@
  * the image (the nearest larger-than-body text on its page or before it).
  *
  * Text: tesseract reads each image at twice its size. The lines it reads are
- * the screen's labels for the description step. Email addresses, phone
- * numbers and the Words to Hide that it reads are covered with a grey box,
- * and the screenshot gets a "check" note: text that could not be read cannot
- * be hidden, so the Library Ready screen tells the user to check the catalog.
+ * the screen's labels for the description step. Only the user's own Words to
+ * Hide are covered (a grey box) where they can be read: the images are
+ * published in the document already, so emails and phone numbers are left as
+ * the document shows them.
  *
  * Nothing of the documents is kept: the downloaded files and everything
  * poppler wrote are deleted when the job ends. The links to the files are
@@ -255,38 +255,27 @@ function linesOf(words) {
   }).sort((a, b) => a.top - b.top || a.left - b.left);
 }
 
-const EMAIL = /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g;
-const PHONE = /(?:\+?\d{1,3}[\s.-]?)?(?:\(\d{2,4}\)|\d{2,4})[\s.-]\d{3,4}[\s.-]\d{3,4}\b/g;
-
-/** Boxes over the words that are an email, a phone number or a word to hide. */
+/** Boxes over the words to hide that can be read on the image. */
 function maskBoxes(lines, words) {
-  const pats = [{ kind: 'email', re: EMAIL }, { kind: 'phone', re: PHONE }];
+  const pats = [];
   for (const w of words || []) {
     if (!w) continue;
     const src = w.trim().split(/\s+/).map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
-    if (src) pats.push({ kind: 'word', re: new RegExp(src, 'gi') });
+    if (src) pats.push(new RegExp(src, 'gi'));
   }
-  const hits = { email: 0, phone: 0, word: 0 };
   const boxes = [];
+  if (!pats.length) return { boxes };
   for (const line of lines) {
     const marked = new Set();
-    for (const { kind, re } of pats) {
-      re.lastIndex = 0;
+    for (const re of pats) {
       for (const m of line.text.matchAll(re)) {
-        if (kind === 'phone') { const d = m[0].replace(/\D/g, '').length; if (d < 10 || d > 15) continue; }
         const s = m.index, e = m.index + m[0].length;
-        let any = false;
-        for (const sp of line.spans) if (sp.s < e && sp.e > s && !marked.has(sp)) { marked.add(sp); any = true; }
-        if (any) hits[kind]++;
+        for (const sp of line.spans) if (sp.s < e && sp.e > s) marked.add(sp);
       }
-    }
-    // An address the reader got slightly wrong ("name@site.con") is still an address.
-    for (const sp of line.spans) {
-      if (!marked.has(sp) && /[A-Za-z0-9]@[A-Za-z0-9]/.test(sp.w.text)) { marked.add(sp); hits.email++; }
     }
     for (const sp of marked) boxes.push(sp.w);
   }
-  return { boxes, hits };
+  return { boxes };
 }
 
 /** Lines worth giving the description step: readable, not stray marks. */
@@ -302,14 +291,6 @@ function labelLines(lines, words) {
     out.push(m);
   }
   return out;
-}
-
-function hiddenNote(hits) {
-  const parts = [];
-  if (hits.email) parts.push(hits.email + ' email address' + (hits.email === 1 ? '' : 'es'));
-  if (hits.phone) parts.push(hits.phone + ' phone number' + (hits.phone === 1 ? '' : 's'));
-  if (hits.word) parts.push(hits.word + ' of your words to hide');
-  return parts.length ? 'Hidden: ' + parts.join(', ') + '. Check this image.' : '';
 }
 
 // ── The job ────────────────────────────────────────────────────────────────
@@ -419,7 +400,7 @@ async function runDocuments(job, urls, outDir) {
       } catch (e) {
         console.error('[job ' + job.id + '] text not read on one image: ' + String(e && e.message || e).split('\n')[0]);
       }
-      const { boxes, hits } = maskBoxes(lines, words);
+      const { boxes } = maskBoxes(lines, words);
       let out = a.buf;
       let jpg = Buffer.from(prep.jpg, 'base64');
       if (boxes.length) {
@@ -450,7 +431,7 @@ async function runDocuments(job, urls, outDir) {
         folder, filename, module: title, screen, target: title + ', page ' + a.page,
         page_title: title, heading: screen, headings: parent ? [parent, screen] : [screen],
         labels: labelLines(lines, words), elements: [], source_path: title + ', page ' + a.page,
-        warning: hiddenNote(hits), width: a.w, height: a.h,
+        warning: '', width: a.w, height: a.h,
       });
       doc.screenshots++;
     }
