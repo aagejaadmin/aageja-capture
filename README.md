@@ -4,6 +4,14 @@ Server side of the **Screenshot Library Builder** agent. Signs in to a product's
 
 Separate from content-api so a browser's memory use never touches content production.
 
+## Finished or not, and listed pages in turn (1.10.0)
+
+- **Verdict:** the Library Ready screen, and the PDF's report, start with "Finished." or "Not finished." Not finished says why the run stopped, what is left (the pages listed with nothing opened yet and those partly opened, or, on a walk, how many links and buttons are left and the areas with most) and the one next step: paste the Continue link into Continue From. It replaces "To capture more".
+- **Listed pages take turns:** the next screen opened comes from the listed page that has had the fewest opened, so a run that stops at its limit has opened something on every page. Within a page, and on a walk, nearest screens come first, as before.
+- **Continue:** a Continue run walks as the earlier run did (listed pages: no links followed) and starts with the pages that have had the least opened.
+- **Report:** lists each page listed with what was opened and what was not; on a walk, what is left by area.
+- `CAPTURE_WALK_SECONDS` shortens the 45-minute limit on a test machine only.
+
 ## Repeats, folders, names and failing clicks (1.9.0)
 
 Each rule reads what any website has (menus, tabs, breadcrumbs, headings), never one product's names or addresses.

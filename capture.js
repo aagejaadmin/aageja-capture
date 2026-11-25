@@ -42,11 +42,12 @@ const USER_SEL = [
 ].join(', ');
 const MAX_TARGETS = 50;
 // The walk: screenshots per run, states tried, clicks from one page, and time.
-// CAPTURE_MAX_SCREENS: a test machine only, to try the limit and Continue with a few screens.
+// CAPTURE_MAX_SCREENS and CAPTURE_WALK_SECONDS: a test machine only, to try
+// the limits and Continue with a few screens or a short time.
 const MAX_SCREENS = Number(process.env.CAPTURE_MAX_SCREENS) || 100;
 const MAX_STATES = 600;
 const MAX_CLICKS = 4;
-const WALK_MS = 45 * 60 * 1000;
+const WALK_MS = (Number(process.env.CAPTURE_WALK_SECONDS) || 45 * 60) * 1000;
 const LEVELS = ['links', 'buttons', 'all'];
 
 class CaptureError extends Error {
@@ -1044,7 +1045,9 @@ async function runCapture(job, creds, outDir) {
     // each listed page (buttons, tabs, dialogs) but follows no links.
     if (!job.targets.length || level !== 'links' || job.resume) {
       job.stage = 'capturing';
-      const followLinks = !job.targets.length;
+      // A Continue run walks as the earlier run did: a run of listed pages
+      // follows no links when it carries on either. (1.10.0)
+      const followLinks = job.resume && typeof job.resume.follow === 'boolean' ? job.resume.follow : !job.targets.length;
       const seeds = [];
       if (job.resume) { /* the earlier run's list of screens still to open */ }
       else if (followLinks) seeds.push({ base: home, actions: [], trail: [], parent: null, phase: 1, capture: true, home: true });
@@ -1056,7 +1059,7 @@ async function runCapture(job, creds, outDir) {
             base: t.url ? (isHome(t) ? home : t.url) : home,
             actions: t.steps ? t.steps.map((s) => ({ step: s, label: s })) : [],
             trail: t.steps ? t.steps.slice() : [shot.screen], parent: null, phase: 1, capture: false,
-            seed: { module: shot.module, screen: shot.screen },
+            seed: { module: shot.module, screen: shot.screen }, root: t.raw, start: true,
           });
         }
       }
@@ -1457,7 +1460,7 @@ async function runCapture(job, creds, outDir) {
             const p = W.urlPattern(c.href).pattern;
             if (seenPat.has(p)) continue;
             seenPat.add(p);
-            q.push({ base: c.href, actions: [], trail: st.trail.concat(c.label || ''), names: (st.names || st.trail).concat(c.label || ''), section: c.section || st.section || '', parent: node, phase, commit, capture: true });
+            q.push({ base: c.href, actions: [], trail: st.trail.concat(c.label || ''), names: (st.names || st.trail).concat(c.label || ''), section: c.section || st.section || '', parent: node, phase, commit, capture: true, root: st.root });
           } else {
             if (c.hidden || !deep) continue;
             if (c.kind === 'link' && !followLinks) continue;
@@ -1477,6 +1480,7 @@ async function runCapture(job, creds, outDir) {
               section: c.section || st.section || '',
               parent: node, phase, commit, probe, nav: !!c.inNav,
               capture: !(cls === 'reveal' && level === 'links'),
+              root: st.root,
             });
           }
         }
@@ -1503,15 +1507,36 @@ async function runCapture(job, creds, outDir) {
         streak.set(k, failed ? (streak.get(k) || 0) + 1 : 0);
         if (failed && streak.get(k) >= SCREEN_FAILS && !stopped.has(k)) { stopped.add(k); w.held[nameOf(st)] = 0; }
       };
+      // Listed pages take turns (1.10.0): the next screen opened is the first
+      // one waiting from the listed page that has had the fewest opened so
+      // far, so a run that stops at its limit has opened something on every
+      // page, not everything on the first few. Within a page, and on a walk
+      // (one start), the order is as before: nearest screens first.
+      // A Continue run starts from what the earlier runs opened on each page,
+      // so it begins with the pages that have had the least opened.
+      const triedBy = new Map(Object.entries(R.opened || {}));
+      const next = () => {
+        if (!q1.length) return q2.shift();
+        let best = 0;
+        let fewest = Infinity;
+        for (let i = 0; i < q1.length; i++) {
+          if (q1[i].root == null) { if (i === 0) break; continue; }
+          const n = triedBy.get(q1[i].root) || 0;
+          if (n < fewest) { fewest = n; best = i; }
+        }
+        return q1.splice(best, 1)[0];
+      };
       while (q1.length || q2.length) {
         if (job.screens.length >= MAX_SCREENS) { w.stopped = 'limit'; break; }
         if (Date.now() - t0 > WALK_MS) { w.stopped = 'time'; break; }
         if (w.tried >= MAX_STATES) { w.stopped = 'tries'; break; }
         if (recent.length === 10 && recent.reduce((x, y) => x + y, 0) >= 6) { w.stopped = 'failures'; w.recent_failed = recent.reduce((x, y) => x + y, 0); break; }
-        const st = q1.length ? q1.shift() : q2.shift();
+        const st = next();
         // The site's navigation is never left: it is how the walk reaches the rest.
         if (st.actions.length && !st.nav && stopped.has(fromOf(st))) { held.push(st); w.held[nameOf(st)] = (w.held[nameOf(st)] || 0) + 1; continue; }
         w.tried++;
+        // A listed page's own screenshot is taken before the walk: only what is opened on it counts.
+        if (st.root != null && !st.start) triedBy.set(st.root, (triedBy.get(st.root) || 0) + 1);
         job.progress.current = masker(st.trail.join(' > ') || 'Home');
         const failedBefore = w.failed;
         try {
@@ -1546,11 +1571,25 @@ async function runCapture(job, creds, outDir) {
       // Screens in an area left after its failures: tried again by Continue.
       for (const s of held) q1.push(s);
       w.left = pending();
+      // What was opened and what is left, for the verdict (1.10.0): by listed
+      // page when pages were listed, else by area (the folder of the screen
+      // the click starts from).
+      const waiting = q1.concat(q2);
+      const roots = [];
+      for (const s of seeds.concat(waiting)) if (s.root != null && !roots.includes(s.root)) roots.push(s.root);
+      for (const r of triedBy.keys()) if (!roots.includes(r)) roots.push(r);
+      if (roots.length) {
+        w.pages = roots.map((r) => ({ page: masker(r), opened: triedBy.get(r) || 0, left: waiting.filter((s) => s.root === r).length }));
+      } else {
+        const areas = {};
+        for (const s of waiting) { const a = masker(s.parent ? s.parent.module : 'Home') || 'Home'; areas[a] = (areas[a] || 0) + 1; }
+        w.areas = areas;
+      }
       w.downloads = downloads.size;
       w.outside = outside.size;
       // What a later run needs to carry on from here, kept with the job for its 24 hours.
       job.walkState = pending() ? {
-        level, q1, q2, seenFp: [...seenFp], seenPat: [...seenPat], seenSig: [...seenSig], keys: [...keys], downloads: [...downloads],
+        level, follow: followLinks, opened: Object.fromEntries(triedBy), q1, q2, seenFp: [...seenFp], seenPat: [...seenPat], seenSig: [...seenSig], keys: [...keys], downloads: [...downloads],
         used: [...used], hosts: [...allowedHosts], scope,
       } : null;
       progress();

@@ -1,6 +1,30 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.9.0 (November 2026)
+ * AaGeJa Capture Service — v1.10.0 (November 2026)
+ *
+ * v1.10.0 — the Library Ready screen says whether the library is finished
+ *   - First on the screen, and first in the PDF's report: "Finished." (with
+ *     what no run captures: buttons that change data, forms past their first
+ *     step that needs data), or "Not finished." with why it stopped, what is
+ *     left and the one next step: the Continue link. With pages listed it
+ *     names the pages with nothing opened yet and the pages partly opened;
+ *     on a walk, how many links and buttons are left and the areas with most.
+ *     It replaces "To capture more". Asked for after a ServiceNow run of 9
+ *     listed pages stopped at 45 minutes with nothing opened on the last 2,
+ *     and the screen said only that 385 links and buttons were not tried.
+ *   - Listed pages take turns: the next screen opened is the first waiting
+ *     from the page that has had the fewest opened, so a run that stops at
+ *     its limit has opened something on every page. Within a page, and on a
+ *     walk, the order is as before. On the stand-in app (4 listed pages,
+ *     a short time limit) 1.9.0 opened screens on the first 2 pages only;
+ *     1.10.0 on all 4.
+ *   - A Continue run walks as the earlier run did (a run of listed pages
+ *     follows no links when it carries on) and starts with the pages that
+ *     have had the least opened across the runs.
+ *   - The report lists each page listed: everything opened, or how many
+ *     opened and how many not yet; on a walk, what is left by area. A run of
+ *     listed pages also says to use the Continue link.
+ *   - CAPTURE_WALK_SECONDS: a test machine only, to try the time limit.
  *
  * v1.9.0 — a library that is easier to use, and a walk that stops wasting time
  *   Every rule reads what any website has (menus, tabs, breadcrumbs,
@@ -358,7 +382,7 @@ const { buildCatalogue } = require('./pdf');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.9.0';
+const VERSION = '1.10.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
@@ -490,7 +514,7 @@ function walkMd(job) {
     '. ' + (w.scope ? 'It captured only addresses under ' + w.scope + ', the folder of the URL you entered. ' : '') +
     n + ' screenshot' + (n === 1 ? '' : 's') + ' taken' + (job.resume ? ' in this run' : '') + '.');
   const left = w.left ? ' ' + w.left + ' link' + (w.left === 1 ? '' : 's') + ' and button' + (w.left === 1 ? '' : 's') + ' it found were not tried yet; many lead to screens already captured.' +
-    (w.mode === 'walk' ? ' To try them, run again with the Continue link in Continue From.' : '') : '';
+    ' To try them, run again with the Continue link in Continue From.' : '';
   if (w.stopped === 'limit') out.push('', 'It stopped at the limit of ' + MAX_SCREENS + ' screenshots a run.' + left);
   else if (w.stopped === 'time') out.push('', 'It stopped after 45 minutes.' + left);
   else if (w.stopped === 'tries') out.push('', 'It stopped after trying 600 screens.' + left);
@@ -503,6 +527,19 @@ function walkMd(job) {
       (k ? '; ' + k + ' click' + (k === 1 ? ' there was' : 's there were') + ' left for Continue.' : '.'));
   } else if (!w.stopped) out.push('', 'It opened every screen it found.');
   out.push('');
+  // What was opened and what is left: on each page listed, or by area (1.10.0).
+  if (w.pages && w.pages.length) {
+    out.push('**The pages you listed**', '');
+    for (const p of w.pages) {
+      out.push('- ' + mdCell(p.page) + ': ' + (p.left
+        ? (p.opened ? p.opened + ' opened, ' + p.left + ' not opened yet' : 'nothing on it opened yet (' + p.left + ' to open)')
+        : (p.opened ? 'everything on it opened (' + p.opened + ')' : 'nothing on it to open')));
+    }
+    out.push('');
+  } else if (w.areas && Object.keys(w.areas).length) {
+    const a = Object.entries(w.areas).sort((x, y) => y[1] - x[1]);
+    out.push('**Not opened yet, by area:** ' + a.slice(0, 12).map(([k, n]) => mdCell(k) + ' (' + n + ')').join(', ') + (a.length > 12 ? ', and ' + (a.length - 12) + ' more' : ''), '');
+  }
   if (w.level === 'all' && Object.keys(w.pressed).length) out.push('**Buttons pressed that change data:** ' + listOf(w.pressed, 30), '');
   const rows = [];
   if (w.level === 'links') rows.push('- **Buttons and dialogs:** not opened. Choose "Buttons and dialogs" to capture them.');
@@ -523,6 +560,59 @@ function walkMd(job) {
   if (Object.keys(w.errors || {}).length) kept.push('- **Showed the site\'s error message, so not kept, and nothing on it was opened:** ' + listOf(w.errors, 30));
   if (w.same) kept.push('- **The same as a screen already captured, so not kept again:** ' + w.same);
   if (kept.length) out.push('**Opened, but not kept**', '', ...kept, '');
+  return out.join('\n');
+}
+
+/**
+ * Is the library finished? (1.10.0) One paragraph, first on the Library Ready
+ * screen and first in the PDF's report, that a user can act on without
+ * reading the report: Finished, or Not finished with why, what is left (the
+ * pages listed that have nothing or only part opened, or the areas with most
+ * left) and the one next step, the Continue link. link is the Continue link
+ * and when its deadline, for the screen; the PDF names the screen instead.
+ */
+function verdictMd(job, remaining, link, when) {
+  const w = job.walk;
+  if (!remaining) {
+    let s;
+    if (!w) s = 'Every page you listed was captured.';
+    else if (w.level === 'links') s = 'It opened every menu item, tab and link it found. Buttons and dialogs were not opened: choose "Buttons and dialogs" to capture them too.';
+    else {
+      s = 'It opened every page, tab, button and dialog it found. Forms and wizards are captured up to their first step that needs data entered.';
+      if (w.level !== 'all' && Object.keys(w.change || {}).length) s += ' Buttons that change data were not pressed; the PDF lists them.';
+    }
+    return '**Finished.** ' + s;
+  }
+  const why = w.stopped === 'time' ? 'It stopped after 45 minutes.'
+    : w.stopped === 'limit' ? 'It stopped at the limit of ' + MAX_SCREENS + ' screenshots a run.'
+    : w.stopped === 'tries' ? 'It stopped after trying 600 screens.'
+    : w.stopped === 'failures' ? 'It stopped early because most of its clicks were failing.'
+    : w.stopped === 'session' ? 'It stopped because the site kept showing its sign-in page.'
+    : 'It stopped clicking on some screens after 3 failed clicks in a row.';
+  const out = ['**Not finished.** ' + why];
+  const pages = w.pages || [];
+  const none = pages.filter((p) => p.left && !p.opened);
+  const part = pages.filter((p) => p.left && p.opened);
+  if (none.length) {
+    out.push('', 'Nothing opened yet on ' + (none.length === 1 ? 'this page' : 'these ' + none.length + ' pages') + ':', '');
+    for (const p of none) out.push('- ' + mdCell(p.page));
+  }
+  if (part.length) {
+    out.push('', 'Partly opened:', '');
+    for (const p of part) out.push('- ' + mdCell(p.page) + ' (' + p.left + ' still to open)');
+  }
+  if (!pages.length) {
+    const a = Object.entries(w.areas || {}).sort((x, y) => y[1] - x[1]).slice(0, 3);
+    const names = a.length > 1 ? a.slice(0, -1).map(([k]) => mdCell(k)).join(', ') + ' and ' + mdCell(a[a.length - 1][0]) : a.length ? mdCell(a[0][0]) : '';
+    const all = Object.keys(w.areas || {}).length === 1;
+    out[0] += remaining === 1 ? ' 1 link or button is not opened yet' + (names ? ', in ' + names : '') + '.'
+      : ' ' + remaining + ' links and buttons are not opened yet' + (names ? (all ? ', all in ' : ', most of them in ') + names : '') + '.';
+  }
+  const starts = pages.length ? ' It starts with the pages that have the least opened.' : ' It carries on where this run stopped.';
+  out.push('', link
+    ? '**To finish:** paste this link into **Continue From** and run the agent again within 24 hours (by ' + when + ').' + starts
+    : '**To finish:** run the agent again with the Continue link from the Library Ready screen, within 24 hours.' + starts);
+  if (link) out.push('', '`' + link + '`');
   return out.join('\n');
 }
 
@@ -918,7 +1008,9 @@ async function finalize(req, res, job) {
   };
   const reports = (prior.reports || []).concat([thisRun]);
   job.reports = reports;
-  const pdfReport = reports.length > 1 ? reports.map((r) => '**Run ' + r.run + '**\n\n' + r.md).join('\n\n') : thisRun.md;
+  const runsReport = reports.length > 1 ? reports.map((r) => '**Run ' + r.run + '**\n\n' + r.md).join('\n\n') : thisRun.md;
+  // The PDF's report starts with the verdict; the screen shows it first anyway.
+  const pdfReport = verdictMd(job, remaining, '', '') + '\n\n' + runsReport;
   let pdf = null;
   try {
     for (const f of files) fs.writeFileSync(path.join(dir, ...f.name.split('/')), f.content);
@@ -972,10 +1064,7 @@ async function finalize(req, res, job) {
   const when = whenUtc(job.expires);
   const plural = (k, one, many) => k + ' ' + (k === 1 ? one : many);
   const md = [];
-  if (remaining) {
-    md.push('**To capture more:** paste this link into **Continue From** and run the agent again within 24 hours (by ' + when + ').', '',
-      '`' + job.library.library_url + '`', '');
-  }
+  md.push(verdictMd(job, remaining, remaining ? job.library.library_url : '', when), '');
   md.push('**Download:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + '): ' + plural(rows.length, 'screenshot', 'screenshots') +
     (earlier ? ' from all runs. Replaces any earlier download.' : ''), '');
   if (pdf) md.push('**Catalog:** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): each screenshot with its name and description', '');
@@ -1000,7 +1089,7 @@ async function finalize(req, res, job) {
     md.push(earlier ? '**New in this run**' : '**Screenshots**', '', '| Screen | Description |', '|---|---|');
     job.library_rows.slice(earlier).forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
     md.push('');
-    if (pdfReport) md.push(pdfReport);
+    if (runsReport) md.push(runsReport);
   }
   job.library.summary_md = md.join('\n');
   saveJob(job);
