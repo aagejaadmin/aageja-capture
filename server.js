@@ -962,6 +962,7 @@ async function start(req, res) {
   // Screenshots from documents (1.11.0): no environment and no sign-in.
   const docs = parseDocuments(body.documents);
   if (docs.length) return startDocuments(req, res, body, product, client, docs);
+  if (Array.isArray(body.documents)) throw new CaptureError('No PDF file was received. Upload the files again.');
   // Both, or neither for an address that opens without signing in.
   if (!!username.trim() !== !!password) throw new CaptureError('Enter both the username and the password, or leave both blank if the address opens the product without signing in.');
   const env = await checkEnvironment(body.environment_url);
