@@ -4,6 +4,16 @@ Server side of the **Screenshot Library Builder** agent. Signs in to a product's
 
 Separate from content-api so a browser's memory use never touches content production.
 
+## Screenshots from documents (1.11.0)
+
+- **What:** `/capture/start` with `documents` (up to 10 links to PDF files the agent uploaded) takes the screenshots out of the files instead of capturing a live product. No environment address, no sign-in. `documents.js` does the work; the description step, `library.json`, the zip and the catalog are the same as for a live capture.
+- **Which images:** each embedded image whose shorter side is at least 100 pixels, each identical image once, not one that repeats on more than 3 pages (a logo or banner) or fills the whole page (a cover). Each keeps its own size: `library.json` says `"image_size": "original"`. At most 100 a run: a file that would go over waits for the next run, and the Library Ready screen names it.
+- **Names:** the folder is the document's title (the PDF's own title, else the file name); the screen is the heading just above the image (text larger than the body text, not a running header). `source_path` is "<title>, page <n>".
+- **Text and hiding:** tesseract reads each image at twice its size. What it reads is the screen's labels for the description step. Emails, phone numbers and the words to hide that it reads are covered with a grey box, and the screenshot is listed to check. Text too small or too faint to read cannot be hidden, so the Library Ready screen says to check the catalog before sharing.
+- **Kept:** nothing of the files. The links live in memory only (like a password) and the downloaded files are deleted when the job ends. Files: public `https` only, at most 60 MB, must be a PDF.
+- **Library Ready:** Finished (or Not finished, with the files left for the next run), what each file gave, the download and catalog, check the catalog before sharing, upload the folder. No sandbox password step. The catalog shows each image at its own size, no wider than the page.
+- **Live captures** are unchanged: on the stand-in app the same requests, screenshots (pixel for pixel), metadata, `library.json`, texts and catalog as 1.10.0, also with a documents job running beside them.
+
 ## Finished or not, and listed pages in turn (1.10.0)
 
 - **Verdict:** the Library Ready screen, and the PDF's report, start with "Finished." or "Not finished." Not finished says why the run stopped, what is left (the pages listed with nothing opened yet and those partly opened, or, on a walk, how many links and buttons are left and the areas with most) and the one next step: paste the Continue link into Continue From. It replaces "To capture more".
@@ -68,7 +78,7 @@ Each rule reads what any website has (menus, tabs, breadcrumbs, headings), never
 
 ## Railway
 
-- Deploys from this repo with the `Dockerfile` (Playwright's own image; its tag must match `playwright` in `package.json`).
+- Deploys from this repo with the `Dockerfile` (Playwright's own image; its tag must match `playwright` in `package.json`). From 1.11.0 the image also installs `poppler-utils` and `tesseract-ocr` (Ubuntu packages) for documents.
 - Variables:
   - `CAPTURE_KEY`: required. A long random string. The agent sends it as `X-AaGeJa-Key`.
   - `RETENTION_HOURS`: optional. Defaults to 24. How long a job and its library are kept.
@@ -84,7 +94,7 @@ Each rule reads what any website has (menus, tabs, breadcrumbs, headings), never
 | Route | Key | What it does |
 |---|---|---|
 | `GET /health` | no | Status |
-| `POST /capture/start` | yes | `{ product, client, environment_url, username, password, targets, click_level, continue_from, mask_words }` → `{ job_id, status_url }`. Username and password: both, or neither for an address that opens without signing in. `targets` blank: walk the product. `click_level`: `links` (default), `buttons` or `all`. |
+| `POST /capture/start` | yes | `{ product, client, environment_url, username, password, targets, click_level, continue_from, mask_words }` → `{ job_id, status_url }`. Username and password: both, or neither for an address that opens without signing in. `targets` blank: walk the product. `click_level`: `links` (default), `buttons` or `all`. Documents (1.11.0): `{ product, client, documents, mask_words }`, `documents` an array of up to 10 PDF links (or one per line); the environment fields are not read. |
 | `GET /capture/status/:id` | yes | Progress, then `screens[]`, `ai_input` (page text for the description step), `report_md`, `not_captured[]` |
 | `GET /capture/image/:id/:folder/:file` | yes | A captured image, for preview |
 | `POST /capture/finalize/:id` | yes | Body: the description step's output as plain text, or `{ descriptions }` → `{ library_url, download_url, expires, summary_md, images[] }` |

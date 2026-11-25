@@ -1,6 +1,24 @@
 #!/usr/bin/env node
 /**
- * AaGeJa Capture Service — v1.10.0 (November 2026)
+ * AaGeJa Capture Service — v1.11.0 (November 2026)
+ *
+ * v1.11.0 — screenshots from documents
+ *   - /capture/start with "documents" (up to 10 links to PDF files, uploaded
+ *     in the agent) takes the screenshots out of the files instead of
+ *     capturing a live product: no environment, no sign-in. documents.js
+ *     does the work; the description step, the library, the zip and the
+ *     catalog are the same as for a live capture. Asked for by two users who
+ *     have help pages and release notes full of screenshots.
+ *   - Each image keeps its own size (library.json image_size "original").
+ *     Named from the heading above it, in a folder named for the document.
+ *     Emails, phone numbers and the words to hide that can be read on an
+ *     image are covered, and the image is listed to check.
+ *   - status_line says which file is being read. The Library Ready text for
+ *     documents: Finished (or the files left for the next run, at 100
+ *     screenshots), what each file gave, check the catalog before sharing,
+ *     no sandbox password step. The catalog fits each image on its page.
+ *   - A live capture is unchanged: the same requests, screenshots, library
+ *     and texts as 1.10.0 on the stand-in app (compared file by file).
  *
  * v1.10.0 — the Library Ready screen says whether the library is finished
  *   - First on the screen, and first in the PDF's report: "Finished." (with
@@ -379,10 +397,11 @@ const crypto = require('node:crypto');
 const dns = require('node:dns').promises;
 const { runCapture, parseTargets, parseSize, isPrivateIp, isInternalName, ALLOW_LOCAL, CaptureError, LEVELS, MAX_SCREENS } = require('./capture');
 const { buildCatalogue } = require('./pdf');
+const { runDocuments, parseDocuments } = require('./documents');
 const png = require('./png-meta');
 const zip = require('./zip');
 
-const VERSION = '1.10.0';
+const VERSION = '1.11.0';
 const PORT = process.env.PORT || 3000;
 const CAPTURE_KEY = process.env.CAPTURE_KEY || '';
 const VOLUME = process.env.RAILWAY_VOLUME_MOUNT_PATH || '';
@@ -572,6 +591,7 @@ function walkMd(job) {
  * and when its deadline, for the screen; the PDF names the screen instead.
  */
 function verdictMd(job, remaining, link, when) {
+  if (job.mode === 'documents') return docsVerdictMd(job);
   const w = job.walk;
   if (!remaining) {
     let s;
@@ -618,6 +638,7 @@ function verdictMd(job, remaining, link, when) {
 
 /** What was not captured and what to check, as Markdown. Empty when there is nothing to report. */
 function reportMd(job) {
+  if (job.mode === 'documents') return docsReportMd(job);
   const out = [];
   const walk = walkMd(job);
   if (walk) out.push(walk);
@@ -654,11 +675,87 @@ function reportMd(job) {
   return out.join('\n');
 }
 
+// ── Documents (1.11.0) ─────────────────────────────────────────────────────
+
+const nWord = (k, one, many) => k + ' ' + (k === 1 ? one : many);
+
+/** "Email - Create: 3 screenshots", or why a file gave none. */
+function docLine(d) {
+  const name = mdCell(d.name);
+  if (d.screenshots && d.left) return name + ': the first ' + d.screenshots + ' of ' + d.found + ' screenshots.';
+  if (d.screenshots) return name + ': ' + nWord(d.screenshots, 'screenshot', 'screenshots');
+  if (d.left) return name + ': not read (' + nWord(d.left, 'screenshot', 'screenshots') + ').';
+  return name + ': ' + mdCell(d.reason || 'No screenshots in this file.');
+}
+
+/** Finished, or the files left for the next run; then what each file gave. */
+function docsVerdictMd(job) {
+  const docs = job.docs || [];
+  const waiting = docs.filter((d) => d.left && !d.screenshots).length;
+  const partial = docs.some((d) => d.left && d.screenshots);
+  const from = docs.filter((d) => d.screenshots).length;
+  const head = waiting || partial
+    ? '**Not finished.** A run takes up to ' + MAX_SCREENS + ' screenshots.' +
+      (waiting ? ' Run the agent again with the ' + (waiting === 1 ? 'file' : 'files') + ' not read.' : '') +
+      (partial ? ' To get the rest of a file, split it into smaller files.' : '')
+    : '**Finished.** ' + nWord(job.screens.length, 'screenshot', 'screenshots') + ' from ' + nWord(from, 'file', 'files') + '.';
+  return [head, '', ...docs.map((d) => '- ' + docLine(d))].join('\n');
+}
+
+/** For the end of the PDF, after the verdict (which lists each file): the screenshots to check. */
+function docsReportMd(job) {
+  const out = [];
+  const warn = job.screens.filter((x) => x.warning);
+  if (warn.length) {
+    out.push('**Check these screenshots**', '');
+    for (const x of warn) out.push('- ' + mdCell(screenLabel(x)) + ' — ' + mdCell(x.warning));
+    out.push('');
+  }
+  return out.join('\n');
+}
+
+/** Why a documents job saved nothing. */
+function docsError(job) {
+  const docs = job.docs || [];
+  return 'No screenshots were taken from ' + (docs.length === 1 ? 'the file' : 'the files') + '.\n\n' + docs.map((d) => '- ' + docLine(d)).join('\n');
+}
+
+/** The Library Ready text for documents. */
+function docsSummaryMd(job, rows, pdf, when, missing) {
+  const md = [docsVerdictMd(job), ''];
+  md.push('**Download:** [' + mdCell(job.product) + ' screenshots (zip)](' + job.library.download_url + '): ' + nWord(rows.length, 'screenshot', 'screenshots'), '');
+  if (pdf) md.push('**Catalog:** [' + mdCell(job.product) + ' screenshots (PDF)](' + job.library.pdf_url + '): each screenshot with its name and description', '');
+  md.push('Download within 24 hours (by ' + when + ').', '',
+    '**Next steps**', '',
+    '1. Check the ' + (pdf ? 'catalog' : 'screenshots') + ' before you share the screenshots. Emails, phone numbers and your words to hide are hidden only where the text could be read.',
+    '2. Unzip and upload the folder to a public link: a GitHub folder, a web folder, or a file listing the image links. The Storyboard and Lab Guide Developer uses this link to embed the screenshots, so share it with everyone building courses on this product.', '');
+  const notes = [];
+  const toCheck = job.screens.filter((x) => x.warning).length;
+  if (toCheck) notes.push(nWord(toCheck, 'screenshot', 'screenshots') + ' to check');
+  if (missing) notes.push(nWord(missing, 'description', 'descriptions') + ' not written (the screen name is used)');
+  if (notes.length) {
+    const list = notes.join(' and ');
+    md.push(list.charAt(0).toUpperCase() + list.slice(1) + '. ' + (pdf ? 'Details are at the end of the PDF.' : 'Details are below.'), '');
+  }
+  if (!pdf) {
+    md.push('**Screenshots**', '', '| Screen | Description |', '|---|---|');
+    job.library_rows.forEach((r, i) => md.push('| [' + mdCell(screenLabel(job.screens[i])) + '](' + r.url + ') | ' + mdCell(r.description) + ' |'));
+    md.push('', docsReportMd(job));
+  }
+  return md.join('\n');
+}
+
 /** One line for the agent's "Still capturing" screen. */
 function statusLine(job) {
   if (job.status === 'queued') {
     const ahead = queue.indexOf(job);
     return ahead > 0 ? 'Waiting to start: ' + ahead + ' capture' + (ahead === 1 ? '' : 's') + ' ahead of yours.' : 'Waiting to start: yours is next.';
+  }
+  if (job.status === 'running' && job.mode === 'documents') {
+    const total = job.progress.total;
+    const at = Math.max(1, Math.min((job.docs || []).length, total));
+    return (total === 1 ? 'Reading the file. ' : 'Reading file ' + at + ' of ' + total + '. ') +
+      nWord(job.screens.length, 'screenshot', 'screenshots') + ' so far.';
   }
   if (job.status === 'running') {
     const n = job.progress ? job.progress.done : 0;
@@ -679,9 +776,10 @@ function publicJob(job, req) {
     product: job.product,
     client: job.client,
     click_level: job.click_level,
-    mode: job.targets.length ? 'list' : 'walk',
+    mode: job.mode === 'documents' ? 'documents' : job.targets.length ? 'list' : 'walk',
     environment_url: job.environment_url,
-    image_size: job.size.width + 'x' + job.size.height,
+    image_size: job.size ? job.size.width + 'x' + job.size.height : 'original',
+    documents: job.docs,
     captured_count: job.screens.length,
     not_captured_count: job.not_captured.length,
     masked_count: job.masked,
@@ -718,17 +816,24 @@ async function runJob(job) {
   job.status = 'running';
   job.started = Date.now();
   saveJob(job);
-  console.log('[job ' + job.id + '] started: ' + (job.targets.length ? job.targets.length + ' target(s)' : 'walk') + ', clicking ' + job.click_level + ' (' + running.size + ' running)');
+  console.log('[job ' + job.id + '] started: ' + (job.mode === 'documents' ? creds.documents.length + ' document(s)' : (job.targets.length ? job.targets.length + ' target(s)' : 'walk') + ', clicking ' + job.click_level) + ' (' + running.size + ' running)');
   try {
-    await runCapture(job, creds, path.join(WORK_DIR, job.id));
-    job.status = job.screens.length ? 'captured' : 'failed';
-    if (!job.screens.length) job.error = 'No pages were captured. See the reasons listed for each page.';
+    if (job.mode === 'documents') {
+      await runDocuments(job, creds.documents, path.join(WORK_DIR, job.id));
+      job.status = job.screens.length ? 'captured' : 'failed';
+      if (!job.screens.length) job.error = docsError(job);
+    } else {
+      await runCapture(job, creds, path.join(WORK_DIR, job.id));
+      job.status = job.screens.length ? 'captured' : 'failed';
+      if (!job.screens.length) job.error = 'No pages were captured. See the reasons listed for each page.';
+    }
   } catch (e) {
     job.status = 'failed';
     job.error = e.userMessage || ('The capture stopped: ' + String(e.message || e).split('\n')[0].slice(0, 200));
   } finally {
     creds.username = null;
     creds.password = null;
+    creds.documents = null;
     job.stage = '';
     job.finished = Date.now();
     console.log('[job ' + job.id + '] ' + job.status + ': ' + job.screens.length + ' captured, ' + job.not_captured.length + ' not captured');
@@ -854,6 +959,9 @@ async function start(req, res) {
   const username = String(body.username || '');
   const password = String(body.password || '');
   if (!product) throw new CaptureError('Product name is required');
+  // Screenshots from documents (1.11.0): no environment and no sign-in.
+  const docs = parseDocuments(body.documents);
+  if (docs.length) return startDocuments(req, res, body, product, client, docs);
   // Both, or neither for an address that opens without signing in.
   if (!!username.trim() !== !!password) throw new CaptureError('Enter both the username and the password, or leave both blank if the address opens the product without signing in.');
   const env = await checkEnvironment(body.environment_url);
@@ -871,6 +979,7 @@ async function start(req, res) {
     const t = (cont.match(/\/library\/([a-f0-9]{32})(?:\/|$)/) || cont.match(/^([a-f0-9]{32})$/) || [])[1];
     const j = t && shares.has(t) ? jobs.get(shares.get(t)) : null;
     if (!j || j.status !== 'done' || !j.expires || Date.now() > j.expires) throw new CaptureError('The Continue From link has expired or is not a Screenshot Library Builder link. Leave Continue From blank to start a new capture.');
+    if (j.mode === 'documents') throw new CaptureError('The Continue From link is for screenshots taken from documents. Leave Continue From blank to start a new capture.');
     if (targets.length) throw new CaptureError('Leave Pages blank to continue an earlier run.');
     if (new URL(j.environment_url).host !== env.host) throw new CaptureError('The Continue From link is for a different environment address. Use the same address as the earlier run.');
     if (!j.walkState) throw new CaptureError('The earlier run captured every screen it found, so there is nothing to continue.');
@@ -919,6 +1028,35 @@ async function start(req, res) {
     queue_position: running.size < CAPACITY ? 0 : position,
     targets: targets.length,
     continues: earlier ? earlier.rows.length : 0,
+    status_url: baseUrl(req) + '/capture/status/' + id,
+  });
+}
+
+/** A documents job: the files' links (kept in memory only, like a password). */
+function startDocuments(req, res, body, product, client, docs) {
+  const maskWords = (Array.isArray(body.mask_words) ? body.mask_words : String(body.mask_words || '').split(/[\n,]/))
+    .map((s) => String(s).trim()).filter((s) => s.length >= 2).slice(0, 50);
+  const id = crypto.randomBytes(12).toString('hex');
+  const job = {
+    id, status: 'queued', stage: '', created: Date.now(), mode: 'documents',
+    product, client, environment_url: '', size: null, mask_words: maskWords, targets: [],
+    click_level: '', progress: { done: 0, total: docs.length, current: '' },
+    screens: [], not_captured: [], masked: 0, blocked_requests: 0, blocked: [], trace: [], debug_image: '',
+    background_requests: 0, background: [], docs: [],
+    _creds: { username: '', password: '', documents: docs },
+  };
+  jobs.set(id, job);
+  queue.push(job);
+  saveJob(job);
+  const position = queue.indexOf(job) + 1;
+  setImmediate(pump);
+  send(res, 202, {
+    job_id: id,
+    status: job.status,
+    queue_position: running.size < CAPACITY ? 0 : position,
+    targets: 0,
+    documents: docs.length,
+    continues: 0,
     status_url: baseUrl(req) + '/capture/status/' + id,
   });
 }
@@ -981,7 +1119,7 @@ async function finalize(req, res, job) {
   const notCaptured = prior.not_captured.concat(job.not_captured.map((n) => ({ target: n.target, reason: n.reason })));
   const library = {
     product: job.product, client: job.client,
-    captured: date, image_size: job.size.width + 'x' + job.size.height, count: rows.length,
+    captured: date, image_size: job.size ? job.size.width + 'x' + job.size.height : 'original', count: rows.length,
     images: rows, not_captured: notCaptured,
   };
   const libraryJson = Buffer.from(JSON.stringify(library, null, 2) + '\n', 'utf8');
@@ -1020,7 +1158,8 @@ async function finalize(req, res, job) {
       const out = path.join(dir, 'screenshots.pdf');
       await buildCatalogue({
         dir, rows, product: job.product, client: job.client, captured: date,
-        size: job.size.width + ' × ' + job.size.height, reportMd: pdfReport, outFile: out,
+        size: job.size ? job.size.width + ' × ' + job.size.height : 'from ' + nWord((job.docs || []).filter((d) => d.screenshots).length, 'file', 'files'),
+        reportMd: pdfReport, outFile: out, fit: job.mode === 'documents',
       });
       pdf = fs.readFileSync(out);
     } catch (e) {
@@ -1091,7 +1230,7 @@ async function finalize(req, res, job) {
     md.push('');
     if (runsReport) md.push(runsReport);
   }
-  job.library.summary_md = md.join('\n');
+  job.library.summary_md = job.mode === 'documents' ? docsSummaryMd(job, rows, pdf, when, missing) : md.join('\n');
   saveJob(job);
   send(res, 200, { ...job.library, images: job.library_rows, not_captured: notCaptured });
 }

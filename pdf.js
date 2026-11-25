@@ -38,9 +38,11 @@ function mdToHtml(md) {
 
 /**
  * rows: library rows { folder, filename, module, screen, description }.
+ * fit (1.11.0, documents): each image at its own size, no wider than the
+ * page and no taller than most of it; without it every image is page-wide.
  * Writes outFile. Returns true when the PDF was made.
  */
-async function buildCatalogue({ dir, rows, product, client, captured, size, reportMd, outFile }) {
+async function buildCatalogue({ dir, rows, product, client, captured, size, reportMd, outFile, fit }) {
   const label = (r) => (r.module && r.screen && r.module.toLowerCase() !== r.screen.toLowerCase() ? r.module + ' > ' + r.screen : (r.screen || r.module));
   const img = (r) => {
     const thumb = path.join(dir, '_thumbs', r.folder, r.filename.replace(/\.png$/, '.jpg'));
@@ -57,7 +59,7 @@ async function buildCatalogue({ dir, rows, product, client, captured, size, repo
   .shot .file { font-size: 8pt; color: #9AAABB; margin: 0 0 3pt; }
   .shot p { margin: 0 0 5pt; line-height: 1.35; }
   .shot img { width: 100%; border: 1px solid #E4DDD0; }
-  .report { break-before: page; page-break-before: always; }
+${fit ? '  .shot img { width: auto; max-width: 100%; max-height: 225mm; }\n' : ''}  .report { break-before: page; page-break-before: always; }
   .report p, .report li { line-height: 1.4; }
 </style></head><body>
 <h1>${esc(product)} screenshots</h1>
